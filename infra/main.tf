@@ -80,17 +80,17 @@ resource "aws_dynamodb_table" "obsyncian" {
   #   read_capacity  = 1
   #   write_capacity = 1
   hash_key       = "UserId"
-  range_key      = "TimeChanged"
+  # range_key      = "TimeChanged"
 
   attribute {
     name = "UserId"
     type = "S"
   }
 
-  attribute {
-    name = "TimeChanged"
-    type = "S"
-  }
+  # attribute {
+  #   name = "TimeChanged"
+  #   type = "S"
+  # }
 
 #   attribute {
 #     name = "TopScore"
