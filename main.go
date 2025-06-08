@@ -14,12 +14,15 @@ import (
 
     "github.com/google/uuid"
     "github.com/charmbracelet/huh"
+    "github.com/charmbracelet/lipgloss"
+    "github.com/charmbracelet/lipgloss/table"
 
     "github.com/aws/aws-sdk-go-v2/aws"
     "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
     "github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+    "github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 
 )
 
@@ -59,11 +62,8 @@ func configure_local() ObsyncianConfig {
     // path := os.UserHomeDir() + "\\obsyncian\\config"
     home_dir, _ := os.UserHomeDir()
     path := fmt.Sprintf("%s/obsyncian/config.json", home_dir) // TODO : are we on windows? change slashes
-    fmt.Printf("Path: '%s' \n", path)
     _, err := os.Stat(path)
 	exists := !errors.Is(err, os.ErrNotExist)
-
-    fmt.Printf("File exists: '%s' \n", exists)
 
     if (!exists){
         id := uuid.New()
@@ -76,9 +76,8 @@ func configure_local() ObsyncianConfig {
         f, err := os.Create(path)
         check(err)
         defer f.Close() // It’s idiomatic to defer a Close immediately after opening a file.
-        n3, err := f.WriteString(fmt.Sprintf("{\n  \"id\" : \"%s\"\n}\n", id))
+        _, err = f.WriteString(fmt.Sprintf("{\n  \"id\" : \"%s\"\n}\n", id))
         check(err)
-        fmt.Printf("wrote %d bytes\n", n3)
         f.Sync() // Issue a Sync to flush writes to stable storage.
     }
 
@@ -90,7 +89,6 @@ func configure_local() ObsyncianConfig {
     if err != nil {
         fmt.Println(err)
     }
-    fmt.Println("Successfully Opened %s", path)
     // defer the closing of our jsonFile so that we can parse it later on
     defer jsonFile.Close()
 
@@ -104,7 +102,7 @@ func configure_local() ObsyncianConfig {
     // jsonFile's content into 'users' which we defined above
     json.Unmarshal(byteValue, &obsyncianConfig)
 
-    fmt.Println("Config ID: " + obsyncianConfig.ID)
+    // fmt.Println("Config ID: " + obsyncianConfig.ID)
 
     // TODO If values are missing, ask for user input
 
@@ -160,7 +158,6 @@ func configure_local() ObsyncianConfig {
     if err != nil {
         fmt.Println("Error writing to file:", err)
     }
-    fmt.Println("Config file updated.")
 
     // err = form.Run()
     // if err != nil {
@@ -188,116 +185,10 @@ func create_user(userId string, tableName string, svc *dynamodb.Client) {
     }
 }
 
-func main() {
-    
-    obsyncianConfig := configure_local()
-
-    // TODO - we have our config file, we can now start reading from Dynamo, and syncing with S3
-
-    // If cloud has new changes, pull them
-    // If I have new changes, and am up to date with cloud, push them
-
-    //* read from Dynamo table
-
-	// 1. Initialize AWS Session (v2 style)
-	// Replace "your-aws-region" with your actual AWS region (e.g., "us-east-1")
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion("ap-southeast-2"), // TODO
-	)
-	if err != nil {
-		log.Fatalf("failed to load AWS config, %v", err)
-	}
-
-	// Create a DynamoDB service client
-	svc := dynamodb.NewFromConfig(cfg)
-
-    tableName := "Obsyncian"
-
-    // * Check if the table is empty
-    // Perform a Scan with Limit 1 and Select "COUNT"
-	// This will tell us if there's at least one item.
-	scanInput := &dynamodb.ScanInput{
-		TableName:      aws.String(tableName),
-		Limit:          aws.Int32(1), // Limit to checking only 1 item
-		Select:         types.SelectCount, // We only care about the count, not the data
-		ConsistentRead: aws.Bool(true), // Optional: For strong consistency (more RCUs)
-	}
-
-	scanResult, err := svc.Scan(context.TODO(), scanInput)
-	if err != nil {
-		log.Fatalf("failed to scan table: %v", err)
-	}
-
-    fmt.Printf("Table scan result '%d'.\n", scanResult.Count)
-
-    // TODO : if 0, sync up, and insert into table (check if s3 bucket is empty?)
-    if scanResult.Count == 0 {
-        fmt.Printf("Syncing...")
-        Sync(obsyncianConfig.Local, fmt.Sprintf("s3://%s", obsyncianConfig.Cloud))
-        fmt.Printf("Finished syncing.\n")
-
-        // userEntry := Item{UserId: obsyncianConfig.ID, Timestamp: time.Now().Format("20060102150405")}
-        // item, err := attributevalue.MarshalMap(userEntry)
-        // fmt.Println(item)
-        // putInput := &dynamodb.PutItemInput{
-        //     TableName: aws.String(tableName), Item: item,
-        // }
-        // _, err = svc.PutItem(context.TODO(), putInput)
-        // if err != nil {
-        //     log.Printf("Couldn't add item to table. Here's why: %v\n", err)
-        // }
-        create_user(obsyncianConfig.ID, tableName, svc)
-        // return err
-    }
-
-	// If Count is 0, the table is empty (at least within the 1MB scanned portion).
-	// If Count is 1, it has at least one item.
-	// if *result.Count == 0 {
-	// 	fmt.Printf("Table '%s' is empty.\n", tableName)
-	// } else {
-	// 	fmt.Printf("Table '%s' contains items. Count: %d\n", tableName, *result.Count)
-	// }
-
-
-    // * Check if our UUID is in the table
-    input := &dynamodb.GetItemInput{
-		TableName: aws.String(tableName),
-		Key: map[string]types.AttributeValue{
-			"UserId": &types.AttributeValueMemberS{Value: obsyncianConfig.ID},
-		},
-	}
-
-    // 4. Execute the GetItem operation
-	// Using context.TODO() for simplicity, in a real application, you might pass a request-scoped context.
-	result, err := svc.GetItem(context.TODO(), input)
-	if err != nil {
-		log.Fatalf("failed to get item from DynamoDB, %v", err)
-	}
-
-	// 5. Unmarshal the result into your Go struct
-	if result.Item == nil {
-		fmt.Printf("No item found with UUID: %s in table: %s\n", obsyncianConfig.ID, tableName)
-		
-        // TODO : create the item and sync down? 
-        create_user(obsyncianConfig.ID, tableName, svc)
-        fmt.Printf("Syncing...")
-        Sync(fmt.Sprintf("s3://%s", obsyncianConfig.Cloud), obsyncianConfig.Local)
-        fmt.Printf("Finished syncing.\n")
-
-	}
-
-	var item Item
-	err = attributevalue.UnmarshalMap(result.Item, &item)
-	if err != nil {
-		log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
-	}
-
-	fmt.Printf("Found item:\n")
-	fmt.Printf("  UUID: %s\n", item.UserId)
-	fmt.Printf("  Timestamp: %s\n", item.Timestamp)
-
+// Scan DynamoDB table for latest timestamp
+func get_latest_sync(tableName string, svc *dynamodb.Client) (string, error) {
     // * scan table for latest timestamp, and get the UUID, if not ours, sync
-    scanInput = &dynamodb.ScanInput{
+    scanInput := &dynamodb.ScanInput{
 		TableName:      aws.String(tableName),
 		// You can optionally project only the Partition Key and Timestamp attributes
 		// if you don't need the full item for the comparison, saving some data transfer.
@@ -313,7 +204,7 @@ func main() {
 	var lastEvaluatedKey map[string]types.AttributeValue // For pagination
 	totalConsumedCapacity := 0.0
 
-	fmt.Printf("Scanning table '%s' to find the globally latest item (WARNING: Can be costly!)...\n", tableName)
+	// fmt.Printf("Scanning table '%s' to find the globally latest item (WARNING: Can be costly!)...\n", tableName)
 
 	// Loop to handle pagination for Scan
 	for {
@@ -341,11 +232,11 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Total Consumed Capacity Units: %.2f\n", totalConsumedCapacity)
+	// fmt.Printf("Total Consumed Capacity Units: %.2f\n", totalConsumedCapacity)
 
 	if len(allItems) == 0 {
-		fmt.Printf("Table '%s' is empty.\n", tableName)
-		return
+		// fmt.Printf("Table '%s' is empty.\n", tableName)
+		return "", nil
 	}
 
 	// --- Find the item with the latest timestamp in memory ---
@@ -357,20 +248,188 @@ func main() {
 
 	latestItem := allItems[0] // The first item after sorting is the latest
 
-	fmt.Printf("\nGlobally Latest Item Found:\n")
-	fmt.Printf("  Partition Key: %s\n", latestItem.UserId)
-	fmt.Printf("  Timestamp: %s\n", latestItem.Timestamp)
-	// fmt.Printf("  Data: %s\n", latestItem.Data)
+	// fmt.Printf("\nGlobally Latest Item Found:\n")
+	// fmt.Printf("  Partition Key: %s\n", latestItem.UserId)
+	// fmt.Printf("  Timestamp: %s\n", latestItem.Timestamp)
 
-	// scanResult, err := svc.Scan(context.TODO(), scanInput)
-	// if err != nil {
-	// 	log.Fatalf("failed to scan table: %v", err)
-	// }
+    return latestItem.Timestamp, nil
+}
 
-    // if Dynamo table empty -> create first entry, and sync from local to cloud
-    // if Dynamo has entry
-    //    if last uuid is us, sync up, and update time changed
-    //    if last uuid is not us, sync down dry run, if changes sync down and store latest time in memory
-    // dry run sync up, if changes, and latest sync in dynamo is not newer than what is stored in memeory, sync up
+func main() {
+
+    latest_ts_synced := "" // The latest timestamp we have synced, might need to move to top of file
+
+    //* Configure local settings, if non-existant
+    obsyncianConfig := configure_local()
+
+    var style = lipgloss.NewStyle().
+        Bold(true).
+        Foreground(lipgloss.Color("#FAFAFA")).
+        Background(lipgloss.Color("#7D56F4")).
+        PaddingTop(2).
+        PaddingLeft(4).
+        Width(80)
+
+    fmt.Println(style.Render("Obsyncian"))
+
+    rows := [][]string{
+        {"ID", obsyncianConfig.ID},
+        {"Local Path", obsyncianConfig.Local},
+        {"Cloud Path", obsyncianConfig.Cloud},
+        {"Cloud Provider", obsyncianConfig.Provider},
+    }
+
+    var (
+        purple    = lipgloss.Color("99")
+        // gray      = lipgloss.Color("245")
+        // lightGray = lipgloss.Color("241")
+
+        headerStyle  = lipgloss.NewStyle().Foreground(purple).Bold(true).Align(lipgloss.Center)
+        evenCellStyle = lipgloss.NewStyle().Padding(0, 1).Width(20)
+        oddCellStyle = lipgloss.NewStyle().Padding(0, 1).Width(60)
+        // oddRowStyle  = cellStyle.Foreground(gray)
+        // evenRowStyle = cellStyle.Foreground(lightGray)
+    )
+
+    t := table.New().
+        Border(lipgloss.NormalBorder()).
+        BorderStyle(lipgloss.NewStyle().Foreground(purple)).
+        StyleFunc(func(row, col int) lipgloss.Style {
+            switch {
+            case row == table.HeaderRow:
+                return headerStyle
+            case col%2 == 0:
+                return evenCellStyle
+            default:
+                return oddCellStyle
+            }
+        }).
+        Headers("CONFIG", "VALUE").
+        Rows(rows...)
+
+    fmt.Println(t)
+
+    // TODO: Cost for the last 3 months...
+
+    // TODO : syncing... (loading spinner thing, and small thing showing files uploading?)
+    
+    
+    // TODO : make it look nice
+    // fmt.Println("ID: ", obsyncianConfig.ID)
+    // fmt.Println("Local Path: ", obsyncianConfig.Local)
+    // fmt.Println("Cloud Path: ", obsyncianConfig.Cloud)
+    // fmt.Println("Cloud Provider: ", obsyncianConfig.Provider)
+
+    //* read from Dynamo table
+
+	// 1. Initialize AWS Session (v2 style)
+	// Replace "your-aws-region" with your actual AWS region (e.g., "us-east-1")
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion("ap-southeast-2"), // TODO
+	)
+	if err != nil {
+		log.Fatalf("failed to load AWS config, %v", err)
+	}
+
+	// Create a DynamoDB service client
+	svc := dynamodb.NewFromConfig(cfg)
+
+    tableName := "Obsyncian"
+
+    // TODO Start looping here?
+    ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+    fmt.Println("Starting loop")
+
+	for range ticker.C {
+        fmt.Println("Task executed at:", time.Now())
+
+        // * Get latest timestamp / Check if the table is empty
+        latest_sync, err := get_latest_sync(tableName, svc)
+        fmt.Println("LATEST CLOUD SYNC: ", latest_sync)
+
+        // If table is empty, and we are the first machine to connect, sync our local copy to cloud, and insert into DB
+        if latest_sync == "" {
+            fmt.Printf("Syncing up...")
+            Sync(obsyncianConfig.Local, fmt.Sprintf("s3://%s", obsyncianConfig.Cloud))
+            fmt.Printf("Finished syncing.\n")
+
+            create_user(obsyncianConfig.ID, tableName, svc)
+        }
+
+        // * Check if our UUID is in the table - and latest time we have synced up (first time creation may not count as a sync up, but down)
+        input := &dynamodb.GetItemInput{
+            TableName: aws.String(tableName),
+            Key: map[string]types.AttributeValue{
+                "UserId": &types.AttributeValueMemberS{Value: obsyncianConfig.ID},
+            },
+        }
+
+        // Using context.TODO() for simplicity, in a real application, you might pass a request-scoped context.
+        result, err := svc.GetItem(context.TODO(), input)
+        if err != nil {
+            log.Fatalf("failed to get item from DynamoDB, %v", err)
+        }
+
+        //! if we don't exist, sync down - OVERWRITING DIR!!!
+        if result.Item == nil {
+            fmt.Printf("No item found with UUID: %s in table: %s\n", obsyncianConfig.ID, tableName)
+
+            // create the user and sync down?
+            create_user(obsyncianConfig.ID, tableName, svc)
+            fmt.Printf("Syncing...")
+            Sync(fmt.Sprintf("s3://%s", obsyncianConfig.Cloud), obsyncianConfig.Local)
+            fmt.Printf("Finished syncing.\n")
+        }
+
+        var item Item
+        err = attributevalue.UnmarshalMap(result.Item, &item)
+        if err != nil {
+            log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
+        }
+
+        // if our timestamp is less than latest timestamp, plus not ours, sync down
+        if obsyncianConfig.ID != item.UserId && latest_sync >= item.Timestamp && latest_ts_synced < latest_sync {
+            fmt.Println("Sync down")
+            // Sync(fmt.Sprintf("s3://%s", obsyncianConfig.Cloud), obsyncianConfig.Local)
+            // TODO : update dynamo with the same timestamp? or just track latest timestamp we've synced with locally?
+            latest_ts_synced = latest_sync
+        } else {
+            fmt.Println("Already synced with Cloud")
+        }
+
+        // TODO : should this be in the else statement above?
+        //* Check if there are new local changes with a dry run, if there are, sync to cloud
+        // fmt.Println("CHECKING IF THINGS ARE SYNCED")
+        isChanges, _ := SyncDryRun(obsyncianConfig.Local, fmt.Sprintf("s3://%s", obsyncianConfig.Cloud))
+        if (isChanges) {
+            fmt.Println("Sync up")
+            Sync(obsyncianConfig.Local, fmt.Sprintf("s3://%s", obsyncianConfig.Cloud))
+
+            // Update timestamp in table
+            update := expression.Set(expression.Name("Timestamp"), expression.Value(time.Now().Format("20060102150405")))
+            expr, err := expression.NewBuilder().WithUpdate(update).Build()
+            putInput := &dynamodb.UpdateItemInput{
+                TableName: aws.String(tableName),
+                Key: map[string]types.AttributeValue{
+                    "UserId": &types.AttributeValueMemberS{Value: obsyncianConfig.ID},
+                },
+                ExpressionAttributeNames:  expr.Names(),
+                ExpressionAttributeValues: expr.Values(),
+                UpdateExpression:          expr.Update(),
+                ReturnValues: types.ReturnValueUpdatedNew, // Return the item's attributes after they are updated
+            }
+            _, err = svc.UpdateItem(context.TODO(), putInput)
+            if err != nil {
+                log.Printf("Couldn't add item to table. Here's why: %v\n", err)
+            }
+        } else {
+            fmt.Println("No changes to sync\n")
+        }
+
+    }
+
+    // time.Sleep(60 * time.Second) // Pauses for 60 seconds
 
 }
