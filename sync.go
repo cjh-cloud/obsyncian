@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	// "fmt"
 	// "sync" // For thread-safe collection of actions
 	"os"
 	"bytes"
@@ -17,12 +17,14 @@ import (
 )
 
 func Sync(source string, destination string) (error) {
-	fmt.Println("Syncing in module...")
-	fmt.Println("source: %s", source)
-	fmt.Println("destination: %s", destination)
+	// fmt.Println("Syncing in module...")
+	// fmt.Println("source: %s", source)
+	// fmt.Println("destination: %s", destination)
 	// Creates an AWS session
 	sess, _ := session.NewSession(&aws.Config{
-		Region: aws.String("ap-southeast-2"),
+		// TODO
+		// config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
+		Region: aws.String("ap-southeast-2"), // TODO
 	})
 
 	syncManager := s3sync.New(sess, s3sync.WithDelete())
@@ -30,7 +32,7 @@ func Sync(source string, destination string) (error) {
 	// Sync from local to s3
 	syncManager.Sync(source, destination)
 
-	fmt.Println("Synced in module.")
+	// fmt.Println("Synced in module.") // TODO, return this
 
 	return nil
 }
@@ -43,9 +45,7 @@ type SyncAction struct {
 }
 
 // Changes to sync? false if no changes, true if there are
-func SyncDryRun(source string, destination string) (bool, error) { 
-
-	
+func SyncDryRun(source string, destination string) (bool, string, error) { 
 
 	// --- Capture stderr ---
 	oldStderr := os.Stderr
@@ -59,7 +59,9 @@ func SyncDryRun(source string, destination string) (bool, error) {
 
 	// Creates an AWS session
 	sess, _ := session.NewSession(&aws.Config{
-		Region: aws.String("ap-southeast-2"),
+		// TODO
+		// config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
+		Region: aws.String("ap-southeast-2"), // TODO
 	})
 
 	syncManager := s3sync.New(sess,
@@ -88,7 +90,7 @@ func SyncDryRun(source string, destination string) (bool, error) {
 
 	capturedOutput := buf.String()
 	// fmt.Println("\n--- RAW DRY RUN OUTPUT (Captured from Stderr) ---")
-	fmt.Println(capturedOutput)
+	// fmt.Println(capturedOutput) // TODO, return this
 	// fmt.Println("\n--- RAW DRY RUN OUTPUT (Captured from Stderr) ---")
 
 	// --- Parse the captured output ---
@@ -127,5 +129,5 @@ func SyncDryRun(source string, destination string) (bool, error) {
 
 	// fmt.Println("\nDry run complete. No files were actually synced or deleted.")
 
-	return isChanges, nil
+	return isChanges, capturedOutput, nil
 }
