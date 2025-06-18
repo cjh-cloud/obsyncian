@@ -13,17 +13,18 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/aws/credentials"
     "github.com/seqsense/s3sync"
 )
 
-func Sync(source string, destination string) (error) {
+func Sync(source string, destination string, awsCredentials Credentials) (error) {
 	// fmt.Println("Syncing in module...")
 	// fmt.Println("source: %s", source)
 	// fmt.Println("destination: %s", destination)
 	// Creates an AWS session
 	sess, _ := session.NewSession(&aws.Config{
 		// TODO
-		// config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
+		Credentials: credentials.NewStaticCredentials(awsCredentials.Key, awsCredentials.Secret, ""),
 		Region: aws.String("ap-southeast-2"), // TODO
 	})
 
@@ -45,7 +46,7 @@ type SyncAction struct {
 }
 
 // Changes to sync? false if no changes, true if there are
-func SyncDryRun(source string, destination string) (bool, string, error) { 
+func SyncDryRun(source string, destination string, awsCredentials Credentials) (bool, string, error) { 
 
 	// --- Capture stderr ---
 	oldStderr := os.Stderr
@@ -60,7 +61,7 @@ func SyncDryRun(source string, destination string) (bool, string, error) {
 	// Creates an AWS session
 	sess, _ := session.NewSession(&aws.Config{
 		// TODO
-		// config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
+		Credentials: credentials.NewStaticCredentials(awsCredentials.Key, awsCredentials.Secret, ""),
 		Region: aws.String("ap-southeast-2"), // TODO
 	})
 

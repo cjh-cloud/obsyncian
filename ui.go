@@ -393,7 +393,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if latest_sync == "" {
             tickerViewContent = tickerViewContent + fmt.Sprintf("Syncing up...\n")
 			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud))
+            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
             tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
 			m.tickerView = tickerViewContent
 
@@ -423,7 +423,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tickerView = tickerViewContent
 			// TODO : how do we get this to update... pass in m.ticketView pointer?
 			// TODO: for starters, just return the file changes,
-            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local)
+            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
             tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
 			m.tickerView = tickerViewContent
         }
@@ -438,7 +438,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if m.config.ID != item.UserId && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
             tickerViewContent = tickerViewContent + fmt.Sprintf("Sync down\n")
 			m.tickerView = tickerViewContent
-            // Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local)
+            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
             // TODO : update dynamo with the same timestamp? or just track latest timestamp we've synced with locally?
             m.latest_ts_synced = latest_sync
         } else {
@@ -449,11 +449,11 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         // TODO : should this be in the else statement above?
         //* Check if there are new local changes with a dry run, if there are, sync to cloud
         // fmt.Println("CHECKING IF THINGS ARE SYNCED")
-        isChanges, plannedChanges, _ := SyncDryRun(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud))
+        isChanges, plannedChanges, _ := SyncDryRun(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
         if (isChanges) {
             tickerViewContent = tickerViewContent + fmt.Sprintf("Sync up:\n %v \n", plannedChanges)
 			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud))
+            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
 
             // Update timestamp in table
             update := expression.Set(expression.Name("Timestamp"), expression.Value(time.Now().Format("20060102150405")))
