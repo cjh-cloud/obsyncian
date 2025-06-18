@@ -188,7 +188,7 @@ func create_user(userId string, tableName string, svc *dynamodb.Client) {
 }
 
 // Scan DynamoDB table for latest timestamp
-func get_latest_sync(tableName string, svc *dynamodb.Client) (string, error) {
+func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, error) {
     // * scan table for latest timestamp, and get the UUID, if not ours, sync
     scanInput := &dynamodb.ScanInput{
 		TableName:      aws.String(tableName),
@@ -238,7 +238,7 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, error) {
 
 	if len(allItems) == 0 {
 		// fmt.Printf("Table '%s' is empty.\n", tableName)
-		return "", nil
+		return "", "", nil
 	}
 
 	// --- Find the item with the latest timestamp in memory ---
@@ -254,7 +254,7 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, error) {
 	// fmt.Printf("  Partition Key: %s\n", latestItem.UserId)
 	// fmt.Printf("  Timestamp: %s\n", latestItem.Timestamp)
 
-    return latestItem.Timestamp, nil
+    return latestItem.Timestamp, latestItem.UserId, nil
 }
 
 type mainModel struct {
@@ -382,7 +382,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tableName := "Obsyncian"
 		// * Get latest timestamp / Check if the table is empty
 		tickerViewContent := fmt.Sprintf("Last updated: %v", time.Now().Format(time.RFC1123)) // TODO, which is better? fmt.Sprint
-        latest_sync, err := get_latest_sync(tableName, m.svc)
+        latest_sync, latest_sync_id, err := get_latest_sync(tableName, m.svc)
 		if err != nil {
             log.Fatalf("failed to get latest sync from DynamoDB, %v", err)
         }
@@ -434,9 +434,13 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
         }
 
+		tickerViewContent = tickerViewContent + fmt.Sprintf("Our ID: %v latest ID: %v latest t: %v latest t synced: %v \n", m.config.ID, item.UserId, latest_sync, m.latest_ts_synced)
+		// item.UserId shows sam ID as us...
+
         // if our timestamp is less than latest timestamp, plus not ours, sync down
-        if m.config.ID != item.UserId && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Sync down\n")
+		// if m.config.ID != item.UserId && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
+        if m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
+            tickerViewContent = tickerViewContent + fmt.Sprintf("Not synced with Cloud. Sync down\n")
 			m.tickerView = tickerViewContent
             Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
             // TODO : update dynamo with the same timestamp? or just track latest timestamp we've synced with locally?
