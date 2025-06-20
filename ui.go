@@ -329,7 +329,7 @@ func initialModel() mainModel {
 	return mainModel{
 		tableView: t,
 		textView: "This is a static text view.\n\nDisplay last 3 months of cost from Cost Explorer.",
-		timer: timer.NewWithInterval(time.Minute * 10, time.Second * 10), // TODO TIME!!!! time.Minute, time.Minute
+		timer: timer.NewWithInterval(time.Second, time.Second), // TODO TIME!!!! time.Minute, time.Minute - (time.Minute * 10, time.Second * 10)
 		textInput: ti,
 		config: obsyncianConfig,
 		svc: svc,
@@ -487,7 +487,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 		if m.timer.Timedout() {
-			m.timer = timer.NewWithInterval(time.Minute, time.Minute) // TODO TIME!!!
+			m.timer = timer.NewWithInterval(time.Minute * 60, time.Minute) // tick ever minute, for an hour
 			cmds = append(cmds, m.timer.Init())
 		}
 	
