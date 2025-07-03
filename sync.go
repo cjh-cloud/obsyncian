@@ -17,10 +17,14 @@ import (
     "github.com/seqsense/s3sync"
 )
 
-func Sync(source string, destination string, awsCredentials Credentials) (error) {
-	// fmt.Println("Syncing in module...")
-	// fmt.Println("source: %s", source)
-	// fmt.Println("destination: %s", destination)
+func Sync(source string, destination string, awsCredentials Credentials) (string, error) {
+	
+	// --- Capture stderr ---
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w // Redirect os.Stderr to the pipe writer
+	log.SetOutput(w)
+
 	// Creates an AWS session
 	sess, _ := session.NewSession(&aws.Config{
 		// TODO
@@ -33,9 +37,20 @@ func Sync(source string, destination string, awsCredentials Credentials) (error)
 	// Sync from local to s3
 	syncManager.Sync(source, destination)
 
-	// fmt.Println("Synced in module.") // TODO, return this
+	// --- Restore stderr and read captured output ---
+	w.Close()
+	os.Stderr = oldStderr // Restore original stderr
+	log.SetOutput(oldStderr) // Restore standard logger output
 
-	return nil
+	var buf bytes.Buffer
+	_, readErr := io.Copy(&buf, r)
+	if readErr != nil {
+		log.Fatalf("Failed to read captured stderr: %v", readErr)
+	}
+
+	capturedOutput := buf.String()
+
+	return capturedOutput, nil
 }
 
 // SyncAction represents a planned action (upload, download, delete)
@@ -70,18 +85,12 @@ func SyncDryRun(source string, destination string, awsCredentials Credentials) (
 		s3sync.WithDelete(),
 	)
 
-	// fmt.Println("SYNC DRY RUN!!!")
-	// testing := syncManager.Sync(source, destination)
-	// fmt.Println(testing)
-	// fmt.Println("SYNC DRY RUN!!!")
-	
 	syncManager.Sync(source, destination)
 
 	// --- Restore stderr and read captured output ---
 	w.Close()
 	os.Stderr = oldStderr // Restore original stderr
 	log.SetOutput(oldStderr) // Restore standard logger output
-
 
 	var buf bytes.Buffer
 	_, readErr := io.Copy(&buf, r)
@@ -90,45 +99,14 @@ func SyncDryRun(source string, destination string, awsCredentials Credentials) (
 	}
 
 	capturedOutput := buf.String()
-	// fmt.Println("\n--- RAW DRY RUN OUTPUT (Captured from Stderr) ---")
-	// fmt.Println(capturedOutput) // TODO, return this
-	// fmt.Println("\n--- RAW DRY RUN OUTPUT (Captured from Stderr) ---")
-
-	// --- Parse the captured output ---
-	// var plannedActions []SyncAction
-	// Adjust regex to account for potential log prefixes from the standard logger
-	// Example: "2025/06/05 23:17:14 upload: path/to/file"
-	// re := regexp.MustCompile(`^(?:.*\s)?(upload|download|delete): (.+)$`) // Non-capturing group for log prefix
-
-	// lines := strings.Split(capturedOutput, "\n")
-	// for _, line := range lines {
-	// 	matches := re.FindStringSubmatch(line)
-	// 	if len(matches) == 3 {
-	// 		actionType := strings.Title(matches[1])
-	// 		filePath := matches[2]
-	// 		plannedActions = append(plannedActions, SyncAction{
-	// 			Action: actionType,
-	// 			Path:   filePath,
-	// 		})
-	// 	}
-	// }
 
 	isChanges := false
 
-	// fmt.Println("\n--- PARSED DRY RUN RESULTS ---")
-	// if len(plannedActions) == 0 {
 	if capturedOutput == "" {
-		// fmt.Println("No changes to sync. Local and S3 are in sync.")
 		isChanges = false
 	} else {
 		isChanges = true
-		// fmt.Printf("Total planned actions: %d\n", len(plannedActions))
-		// for _, action := range plannedActions {
-		// 	fmt.Printf("- Action: %-8s | Path: %s\n", action.Action, action.Path)
-		// }
 	}
-
-	// fmt.Println("\nDry run complete. No files were actually synced or deleted.")
 
 	return isChanges, capturedOutput, nil
 }

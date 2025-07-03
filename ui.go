@@ -267,6 +267,7 @@ type mainModel struct {
 	config ObsyncianConfig
 	svc *dynamodb.Client
 	latest_ts_synced string
+	firstCycle int // just used to skip the first time cycle
 }
 
 //! All the stuff we need to initialise
@@ -334,6 +335,7 @@ func initialModel() mainModel {
 		config: obsyncianConfig,
 		svc: svc,
 		latest_ts_synced: "",
+		firstCycle: 0,
 	}
 }
 
@@ -344,6 +346,8 @@ func (m mainModel) Init() tea.Cmd {
 func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
+
+	
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -375,6 +379,16 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case timer.TickMsg:
 		m.timer, cmd = m.timer.Update(msg)
+
+		// working out the first load that says syncing down
+		if m.firstCycle < 1 {
+			m.firstCycle = m.firstCycle + 1
+			m.tickerView =  fmt.Sprint("cycle: %v", m.firstCycle)
+			cmds = append(cmds, cmd)
+			m.timer = timer.NewWithInterval(time.Minute * 60, time.Minute) // tick ever minute, for an hour
+			cmds = append(cmds, m.timer.Init())
+			return m, tea.Batch(cmds...)
+		}
 		// m.tickerView = fmt.Sprint("Last updated: %v", time.Now().Format(time.RFC1123))
 
 		// TODO : spinner
@@ -393,7 +407,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         if latest_sync == "" {
             tickerViewContent = tickerViewContent + fmt.Sprintf("Syncing up...\n")
 			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
+            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials) // TODO sync
             tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
 			m.tickerView = tickerViewContent
 
@@ -423,7 +437,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tickerView = tickerViewContent
 			// TODO : how do we get this to update... pass in m.ticketView pointer?
 			// TODO: for starters, just return the file changes,
-            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
+            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials) // TODO sync
             tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
 			m.tickerView = tickerViewContent
         }
@@ -434,19 +448,19 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
         }
 
-		tickerViewContent = tickerViewContent + fmt.Sprintf("Our ID: %v latest ID: %v latest t: %v latest t synced: %v \n", m.config.ID, item.UserId, latest_sync, m.latest_ts_synced)
+		// tickerViewContent = tickerViewContent + fmt.Sprintf("Our ID: %v latest ID: %v latest t: %v latest t synced: %v \n", m.config.ID, item.UserId, latest_sync, m.latest_ts_synced)
 		// item.UserId shows sam ID as us...
 
         // if our timestamp is less than latest timestamp, plus not ours, sync down
 		// if m.config.ID != item.UserId && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
         if m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Not synced with Cloud. Sync down\n")
+            tickerViewContent = tickerViewContent + fmt.Sprintf("Not synced with Cloud. Sync down:\n")
 			m.tickerView = tickerViewContent
-            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
+            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials) // TODO does this cause writing? TODO sync
             // TODO : update dynamo with the same timestamp? or just track latest timestamp we've synced with locally?
             m.latest_ts_synced = latest_sync
         } else {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Already synced with Cloud\n")
+            // tickerViewContent = tickerViewContent + fmt.Sprintf("Already synced with Cloud\n")
 			m.tickerView = tickerViewContent
         }
 
@@ -455,9 +469,9 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         // fmt.Println("CHECKING IF THINGS ARE SYNCED")
         isChanges, plannedChanges, _ := SyncDryRun(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
         if (isChanges) {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Sync up:\n %v \n", plannedChanges)
+            tickerViewContent = tickerViewContent + fmt.Sprintf("Sync up:\n %v \n", plannedChanges) // TODO : this is good!, writes to box
 			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
+            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials) // TODO: doesn't seem like this prints TODO sync
 
             // Update timestamp in table
             update := expression.Set(expression.Name("Timestamp"), expression.Value(time.Now().Format("20060102150405")))
@@ -477,7 +491,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 log.Printf("Couldn't add item to table. Here's why: %v\n", err)
             }
         } else {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("No changes to sync\n")
+            // tickerViewContent = tickerViewContent + fmt.Sprintf("No changes to sync\n")
 			m.tickerView = tickerViewContent
         }
 
