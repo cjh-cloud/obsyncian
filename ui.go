@@ -18,11 +18,9 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/timer"
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
-	// "github.com/charmbracelet/lipgloss/table"
 	"github.com/charmbracelet/huh"
-	// "github.com/fogleman/ease"
-	// "github.com/lucasb-eyer/go-colorful"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
     "github.com/aws/aws-sdk-go-v2/config"
@@ -30,7 +28,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
     "github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
-    "github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 )
 
 func check(e error) {
@@ -257,13 +254,22 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
     return latestItem.Timestamp, latestItem.UserId, nil
 }
 
+type focusState int
+
+const (
+	focusTable focusState = iota // 0
+	focusText // 1
+	focusTicker // 2
+)
+
 type mainModel struct {
 	tableView table.Model
-	textView string
-	tickerView string
+	textView viewport.Model
+	tickerView viewport.Model
 	timer timer.Model
 	textInput textinput.Model
 	editing bool
+	focus focusState
 	config ObsyncianConfig
 	svc *dynamodb.Client
 	latest_ts_synced string
@@ -272,13 +278,11 @@ type mainModel struct {
 
 //! All the stuff we need to initialise
 
-
 func initialModel() mainModel {
 
 	//!
 	obsyncianConfig := configure_local()
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		// config.WithSharedConfigProfile("test-account")),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
 		config.WithRegion("ap-southeast-2"), // TODO should be in config file
 	)
@@ -287,8 +291,6 @@ func initialModel() mainModel {
 	}
 
 	svc := dynamodb.NewFromConfig(cfg)
-
-	// tableName := "Obsyncian"
 	//!
 
 	columns := []table.Column{
@@ -327,11 +329,19 @@ func initialModel() mainModel {
 	ti.CharLimit = 20
 	ti.Width = 20
 
+	vp := viewport.New(43, 20) // Width 43, Height 20 lines
+	vp.SetContent("This is a static text view.\n\nDisplay last 3 months of cost from Cost Explorer.")
+
+	tickerVp := viewport.New(80, 10) // Width 80, Height 10 lines
+	tickerVp.SetContent("Ticker view - sync status will appear here")
+
 	return mainModel{
 		tableView: t,
-		textView: "This is a static text view.\n\nDisplay last 3 months of cost from Cost Explorer.",
+		textView: vp,
+		tickerView: tickerVp,
 		timer: timer.NewWithInterval(time.Second, time.Second), // TODO TIME!!!! time.Minute, time.Minute - (time.Minute * 10, time.Second * 10)
 		textInput: ti,
+		focus: focusTable,
 		config: obsyncianConfig,
 		svc: svc,
 		latest_ts_synced: "",
@@ -347,14 +357,20 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
-	
-
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if !m.editing {
 				return m, tea.Quit
+			}
+		case "tab":
+			if !m.editing {
+				m.focus = (m.focus + 1) % 3
+			}
+		case "shift+tab":
+			if !m.editing {
+				m.focus = (m.focus + 2) % 3 // Go backwards
 			}
 		case "enter":
 			if m.editing {
@@ -364,7 +380,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editing = false
 				m.textInput.Blur()
 				m.textInput.Reset()
-			} else {
+			} else if m.focus == focusTable {
 				m.editing = true
 				m.textInput.SetValue(m.tableView.SelectedRow()[1])
 				m.textInput.Focus()
@@ -375,6 +391,46 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Blur()
 				m.textInput.Reset()
 			}
+		case "up", "k":
+			if !m.editing {
+				switch m.focus {
+				case focusTable:
+					// Table handles its own navigation
+				case focusText:
+					m.textView.LineUp(1)
+				case focusTicker:
+					m.tickerView.LineUp(1)
+				}
+			}
+		case "down", "j":
+			if !m.editing {
+				switch m.focus {
+				case focusTable:
+					// Table handles its own navigation
+				case focusText:
+					m.textView.LineDown(1)
+				case focusTicker:
+					m.tickerView.LineDown(1)
+				}
+			}
+		case "pgup":
+			if !m.editing {
+				switch m.focus {
+				case focusText:
+					m.textView.ViewUp()
+				case focusTicker:
+					m.tickerView.ViewUp()
+				}
+			}
+		case "pgdown":
+			if !m.editing {
+				switch m.focus {
+				case focusText:
+					m.textView.ViewDown()
+				case focusTicker:
+					m.tickerView.ViewDown()
+				}
+			}
 		}
 
 	case timer.TickMsg:
@@ -383,142 +439,43 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// working out the first load that says syncing down
 		if m.firstCycle < 1 {
 			m.firstCycle = m.firstCycle + 1
-			m.tickerView =  fmt.Sprint("cycle: %v", m.firstCycle)
+			m.tickerView.SetContent(fmt.Sprintf("cycle: %v", m.firstCycle)) // TODO loader
 			cmds = append(cmds, cmd)
 			m.timer = timer.NewWithInterval(time.Minute * 60, time.Minute) // tick ever minute, for an hour
 			cmds = append(cmds, m.timer.Init())
 			return m, tea.Batch(cmds...)
 		}
-		// m.tickerView = fmt.Sprint("Last updated: %v", time.Now().Format(time.RFC1123))
 
-		// TODO : spinner
-		// time.Sleep(5 * time.Second) // This blocks
-		tableName := "Obsyncian"
-		// * Get latest timestamp / Check if the table is empty
-		tickerViewContent := fmt.Sprintf("Last updated: %v", time.Now().Format(time.RFC1123)) // TODO, which is better? fmt.Sprint
-        latest_sync, latest_sync_id, err := get_latest_sync(tableName, m.svc)
-		if err != nil {
-            log.Fatalf("failed to get latest sync from DynamoDB, %v", err)
-        }
-		tickerViewContent = tickerViewContent + fmt.Sprintf("\n LATEST CLOUD SYNC: %v \n", latest_sync)
-		m.tickerView = tickerViewContent
-
-		// If table is empty, and we are the first machine to connect, sync our local copy to cloud, and insert into DB
-        if latest_sync == "" {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Syncing up...\n")
-			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials) // TODO sync
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
-			m.tickerView = tickerViewContent
-
-            create_user(m.config.ID, tableName, m.svc)
-        }
-
-        // * Check if our UUID is in the table - and latest time we have synced up (first time creation may not count as a sync up, but down)
-        input := &dynamodb.GetItemInput{
-            TableName: aws.String(tableName),
-            Key: map[string]types.AttributeValue{
-                "UserId": &types.AttributeValueMemberS{Value: m.config.ID},
-            },
-        }
-        // Using context.TODO() for simplicity, in a real application, you might pass a request-scoped context.
-        result, err := m.svc.GetItem(context.TODO(), input)
-        if err != nil {
-            log.Fatalf("failed to get item from DynamoDB, %v", err)
-        }
-        //! if we don't exist, sync down - OVERWRITING DIR!!!
-        if result.Item == nil {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("No item found with UUID: %s in table: %s\n", m.config.ID, tableName)
-			m.tickerView = tickerViewContent
-
-            // create the user and sync down?
-            create_user(m.config.ID, tableName, m.svc)
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Syncing...\n")
-			m.tickerView = tickerViewContent
-			// TODO : how do we get this to update... pass in m.ticketView pointer?
-			// TODO: for starters, just return the file changes,
-            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials) // TODO sync
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Finished syncing.\n")
-			m.tickerView = tickerViewContent
-        }
-
-        var item Item
-        err = attributevalue.UnmarshalMap(result.Item, &item)
-        if err != nil {
-            log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
-        }
-
-		// tickerViewContent = tickerViewContent + fmt.Sprintf("Our ID: %v latest ID: %v latest t: %v latest t synced: %v \n", m.config.ID, item.UserId, latest_sync, m.latest_ts_synced)
-		// item.UserId shows sam ID as us...
-
-        // if our timestamp is less than latest timestamp, plus not ours, sync down
-		// if m.config.ID != item.UserId && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
-        if m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Not synced with Cloud. Sync down:\n")
-			m.tickerView = tickerViewContent
-            Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials) // TODO does this cause writing? TODO sync
-            // TODO : update dynamo with the same timestamp? or just track latest timestamp we've synced with locally?
-            m.latest_ts_synced = latest_sync
-        } else {
-            // tickerViewContent = tickerViewContent + fmt.Sprintf("Already synced with Cloud\n")
-			m.tickerView = tickerViewContent
-        }
-
-        // TODO : should this be in the else statement above?
-        //* Check if there are new local changes with a dry run, if there are, sync to cloud
-        // fmt.Println("CHECKING IF THINGS ARE SYNCED")
-        isChanges, plannedChanges, _ := SyncDryRun(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
-        if (isChanges) {
-            tickerViewContent = tickerViewContent + fmt.Sprintf("Sync up:\n %v \n", plannedChanges) // TODO : this is good!, writes to box
-			m.tickerView = tickerViewContent
-            Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials) // TODO: doesn't seem like this prints TODO sync
-
-            // Update timestamp in table
-            update := expression.Set(expression.Name("Timestamp"), expression.Value(time.Now().Format("20060102150405")))
-            expr, err := expression.NewBuilder().WithUpdate(update).Build()
-            putInput := &dynamodb.UpdateItemInput{
-                TableName: aws.String(tableName),
-                Key: map[string]types.AttributeValue{
-                    "UserId": &types.AttributeValueMemberS{Value: m.config.ID},
-                },
-                ExpressionAttributeNames:  expr.Names(),
-                ExpressionAttributeValues: expr.Values(),
-                UpdateExpression:          expr.Update(),
-                ReturnValues: types.ReturnValueUpdatedNew, // Return the item's attributes after they are updated
-            }
-            _, err = m.svc.UpdateItem(context.TODO(), putInput)
-            if err != nil {
-                log.Printf("Couldn't add item to table. Here's why: %v\n", err)
-            }
-        } else {
-            // tickerViewContent = tickerViewContent + fmt.Sprintf("No changes to sync\n")
-			m.tickerView = tickerViewContent
-        }
-
-		m.tickerView = tickerViewContent
-		//!
-
+		tickerContent := handleSync(&m)
+		m.tickerView.SetContent(tickerContent)
 		cmds = append(cmds, cmd)
 
 		if m.timer.Timedout() {
 			m.timer = timer.NewWithInterval(time.Minute * 60, time.Minute) // tick ever minute, for an hour
 			cmds = append(cmds, m.timer.Init())
 		}
-	
+
 	case timer.StartStopMsg:
 		m.timer, cmd = m.timer.Update(msg)
 		cmds = append(cmds, m.timer.Init())
-
-		// m.timer = timer.NewWithInterval(time.Minute, time.Second)
-		// cmds = append(cmds, m.timer.Init())
 	}
 
 	if m.editing {
 		m.textInput, cmd = m.textInput.Update(msg)
 		cmds = append(cmds, cmd)
 	} else {
-		m.tableView, cmd = m.tableView.Update(msg)
-		cmds = append(cmds, cmd)
+		// Only update the focused view for navigation
+		switch m.focus {
+		case focusTable:
+			m.tableView, cmd = m.tableView.Update(msg)
+			cmds = append(cmds, cmd)
+		case focusText:
+			m.textView, cmd = m.textView.Update(msg)
+			cmds = append(cmds, cmd)
+		case focusTicker:
+			m.tickerView, cmd = m.tickerView.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -526,8 +483,12 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m mainModel) View() string {
 	viewContainerStyle := lipgloss.NewStyle().Padding(1, 2)
-	topViewStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	bottomViewStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginTop(1)
+	// topViewStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
+	// bottomViewStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1).MarginTop(1)
+	
+	// Focus styles
+	focusedStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
+	unfocusedStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
 
 	// Top Views (Table and Text)
 	var tableViewContent string
@@ -537,18 +498,48 @@ func (m mainModel) View() string {
 		tableViewContent = m.tableView.View() + "\nPress 'enter' to edit."
 	}
 
-	leftView := topViewStyle.Width(35).Render(tableViewContent)
-	rightView := topViewStyle.Width(45).Render(m.textView)
+	// Apply focus styling
+	var leftView, rightView string
+	if m.focus == focusTable {
+		leftView = focusedStyle.Width(35).Render(tableViewContent)
+	} else {
+		leftView = unfocusedStyle.Width(35).Render(tableViewContent)
+	}
+	
+	if m.focus == focusText {
+		rightView = focusedStyle.Width(45).Render(m.textView.View())
+	} else {
+		rightView = unfocusedStyle.Width(45).Render(m.textView.View())
+	}
+	
 	// TODO : make them all vertically aligned
 	topViews := lipgloss.JoinHorizontal(lipgloss.Top, leftView, rightView)
 
 	// Bottom View
-	bottomView := bottomViewStyle.Width(82).Render(m.tickerView)
+	var bottomView string
+	if m.focus == focusTicker {
+		bottomView = focusedStyle.Width(82).Render(m.tickerView.View())
+	} else {
+		bottomView = unfocusedStyle.Width(82).Render(m.tickerView.View())
+	}
 
 	// Final Layout
 	finalView := lipgloss.JoinVertical(lipgloss.Left, topViews, bottomView)
 
-	return viewContainerStyle.Render(finalView)
+	// Add help text
+	helpText := "\nTab: Switch focus | ↑/↓: Scroll | PgUp/PgDn: Page scroll | Enter: Edit (table) | Esc: Cancel edit | Ctrl+C/Q: Quit"
+	
+	return viewContainerStyle.Render(finalView + helpText)
+}
+
+// updateTextViewContent updates the content of the textView viewport
+func (m *mainModel) updateTextViewContent(content string) {
+	m.textView.SetContent(content)
+}
+
+// updateTickerViewContent updates the content of the tickerView viewport
+func (m *mainModel) updateTickerViewContent(content string) {
+	m.tickerView.SetContent(content)
 }
 
 func main() {
