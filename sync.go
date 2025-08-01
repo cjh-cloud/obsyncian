@@ -7,14 +7,13 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"context"
 	// "regexp" // For parsing output
 	// "strings"
 
-
-	"github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-    "github.com/seqsense/s3sync"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/seqsense/s3sync"
 )
 
 func Sync(source string, destination string, awsCredentials Credentials) (string, error) {
@@ -25,14 +24,12 @@ func Sync(source string, destination string, awsCredentials Credentials) (string
 	os.Stderr = w // Redirect os.Stderr to the pipe writer
 	log.SetOutput(w)
 
-	// Creates an AWS session
-	sess, _ := session.NewSession(&aws.Config{
-		// TODO
-		Credentials: credentials.NewStaticCredentials(awsCredentials.Key, awsCredentials.Secret, ""),
-		Region: aws.String("ap-southeast-2"), // TODO
-	})
+	cfg, _ := config.LoadDefaultConfig(context.TODO(),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(awsCredentials.Key, awsCredentials.Secret, "")),
+		config.WithRegion("ap-southeast-2"), // TODO should be in config file
+	)
 
-	syncManager := s3sync.New(sess, s3sync.WithDelete())
+	syncManager := s3sync.New(cfg, s3sync.WithDelete())
 
 	// Sync from local to s3
 	syncManager.Sync(source, destination)
@@ -73,14 +70,13 @@ func SyncDryRun(source string, destination string, awsCredentials Credentials) (
 	// This line is often crucial if you're using `log.Printf` directly.
 	log.SetOutput(w)
 
-	// Creates an AWS session
-	sess, _ := session.NewSession(&aws.Config{
-		// TODO
-		Credentials: credentials.NewStaticCredentials(awsCredentials.Key, awsCredentials.Secret, ""),
-		Region: aws.String("ap-southeast-2"), // TODO
-	})
+	// Create AWS config using AWS SDK v2
+	cfg, _ := config.LoadDefaultConfig(context.TODO(),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(awsCredentials.Key, awsCredentials.Secret, "")),
+		config.WithRegion("ap-southeast-2"), // TODO should be in config file
+	)
 
-	syncManager := s3sync.New(sess,
+	syncManager := s3sync.New(cfg,
 		s3sync.WithDryRun(),
 		s3sync.WithDelete(),
 	)
