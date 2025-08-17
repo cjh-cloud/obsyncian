@@ -10,6 +10,7 @@ import (
 	"io"
 	"sort"
 	"encoding/json"
+	"net"
 
 	"github.com/google/uuid"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	awshttp "github.com/aws/smithy-go/transport/http"
 )
 
 const tableName = "Obsyncian"
@@ -207,7 +210,23 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 
 		result, err := svc.Scan(ctx, scanInput)
 		if err != nil {
-			log.Fatalf("Failed to scan DynamoDB table: %v", err)
+			var reqErr *awshttp.RequestSendError
+			if errors.As(err, &reqErr) {
+				// log.Fatalf("AWS request send error:", reqErr)
+				// Check for underlying network error
+				var netErr net.Error
+				if errors.As(reqErr.Unwrap(), &netErr) {
+					// log.Fatalf("Network error:", netErr)
+					// Retry or inform user
+					return "", "", fmt.Errorf("network error: %w", err)
+				}
+			} else if errors.Is(err, context.DeadlineExceeded) {
+				return "", "", fmt.Errorf("context error: %w", err)
+			} else {
+				// fmt.Println("Other error:", err)
+				// Handle other errors
+				log.Fatalf("Failed to scan DynamoDB table: %v", err)
+			}
 		}
 		totalConsumedCapacity += *result.ConsumedCapacity.CapacityUnits
 
@@ -297,7 +316,9 @@ Line 25: End of content - scroll up to see more`
 
 	latest_sync, latest_sync_id, err := get_latest_sync(tableName, m.svc)
 	if err != nil {
-		log.Fatalf("failed to get latest sync from DynamoDB, %v", err)
+		// log.Fatalf("failed to get latest sync from DynamoDB, %v", err)
+		tickerViewContent = fmt.Sprintf("Error getting latest sync time: %v\n", err)
+		return tickerViewContent
 	}
 	tickerViewContent += fmt.Sprintf("\n LATEST CLOUD SYNC: %v \n", latest_sync)
 
