@@ -13,7 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/seqsense/s3sync"
+	"github.com/seqsense/s3sync/v2"
 )
 
 func Sync(source string, destination string, awsCredentials Credentials) (string, error) {
@@ -32,7 +32,7 @@ func Sync(source string, destination string, awsCredentials Credentials) (string
 	syncManager := s3sync.New(cfg, s3sync.WithDelete())
 
 	// Sync from local to s3
-	syncManager.Sync(source, destination)
+	syncManager.Sync(context.TODO(), source, destination)
 
 	// --- Restore stderr and read captured output ---
 	w.Close()
@@ -81,7 +81,7 @@ func SyncDryRun(source string, destination string, awsCredentials Credentials) (
 		s3sync.WithDelete(),
 	)
 
-	syncManager.Sync(source, destination)
+	syncManager.Sync(context.TODO(), source, destination)
 
 	// --- Restore stderr and read captured output ---
 	w.Close()
