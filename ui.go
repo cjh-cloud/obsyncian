@@ -2,14 +2,11 @@
 package main
 
 import (
-	
 	"fmt"
     "log"
-	
-    
     "context"
     "time"
-    // "sort"
+    "bytes"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/table"
@@ -17,14 +14,10 @@ import (
 	"github.com/charmbracelet/bubbles/timer"
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
-	// "github.com/charmbracelet/huh"
 
-	// "github.com/aws/aws-sdk-go-v2/aws"
     "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	// "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-    // "github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 )
 
 type focusState int
@@ -54,6 +47,13 @@ type mainModel struct {
 	svc *dynamodb.Client
 	latest_ts_synced string
 	firstCycle int // just used to skip the first time cycle
+	outputBuffer  *bytes.Buffer
+}
+
+func (m *mainModel) appendOutput(text string) {
+	m.outputBuffer.WriteString(text + "\n")
+	m.tickerView.SetContent(m.outputBuffer.String())
+	m.tickerView.GotoBottom()
 }
 
 //! All the stuff we need to initialise
@@ -115,6 +115,8 @@ func initialModel() mainModel {
 	tickerVp := viewport.New(80, 10) // Width 80, Height 10 lines
 	tickerVp.SetContent("Ticker view - sync status will appear here")
 
+	outputBuffer := &bytes.Buffer{}
+
 	return mainModel{
 		tableView: t,
 		textView: vp,
@@ -127,6 +129,7 @@ func initialModel() mainModel {
 		svc: svc,
 		latest_ts_synced: "",
 		firstCycle: 0,
+		outputBuffer: outputBuffer,
 	}
 }
 
@@ -235,8 +238,7 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-		tickerContent := handleSync(&m)
-		m.tickerView.SetContent(tickerContent)
+		handleSync(&m)
 		cmds = append(cmds, cmd)
 
 		if m.timer.Timedout() {
