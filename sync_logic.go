@@ -17,7 +17,11 @@ import (
 	"github.com/charmbracelet/huh"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
+	cetypes "github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
+	"strings"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
@@ -142,28 +146,17 @@ func configure_local() ObsyncianConfig {
                 huh.NewOption("Microsoft Azure", "Azure"),
                 huh.NewOption("Google Cloud", "GCP"),
             ).
-            Value(&obsyncianConfig.Provider). // store the chosen option in the "burger" variable
+            Value(&obsyncianConfig.Provider).
             Run()
     }
 
     config_json, err := json.Marshal(obsyncianConfig)
     check(err)
-    configFileWriter, err := os.Create(path) // os.Open(path)
+    configFileWriter, err := os.Create(path)
     _, err = configFileWriter.Write(config_json)
-    // check(err)
     if err != nil {
         fmt.Println("Error writing to file:", err)
     }
-
-    // err = form.Run()
-    // if err != nil {
-	// 	fmt.Println("Uh oh:", err)
-	// 	os.Exit(1)
-	// }
-
-    // if !discount {
-    //     fmt.Println("What? You didn’t take the discount?!")
-    // }
 
     return obsyncianConfig
 }
@@ -177,7 +170,7 @@ func create_user(userId string, tableName string, svc *dynamodb.Client) {
     }
     _, err = svc.PutItem(context.TODO(), putInput)
     if err != nil {
-        log.Printf("Couldn't add item to table. Here's why: %v\n", err)
+        log.Printf("Couldn't add item to table. Here's why: %v", err)
     }
 }
 
@@ -195,12 +188,9 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 		ReturnConsumedCapacity: types.ReturnConsumedCapacityTotal, // For logging RCU usage // TODO : find out more
 	}
 
-    // --- Execute Scan and Find Latest ---
 	var allItems []Item
 	var lastEvaluatedKey map[string]types.AttributeValue // For pagination
 	totalConsumedCapacity := 0.0
-
-	// fmt.Printf("Scanning table '%s' to find the globally latest item (WARNING: Can be costly!)...\n", tableName)
 
 	// Loop to handle pagination for Scan
 	for {
@@ -208,23 +198,20 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) // Add a timeout for each scan page
 		defer cancel()
 
+		// Handle network errors, so that we can retry once connection is back
 		result, err := svc.Scan(ctx, scanInput)
 		if err != nil {
 			var reqErr *awshttp.RequestSendError
 			if errors.As(err, &reqErr) {
-				// log.Fatalf("AWS request send error:", reqErr)
 				// Check for underlying network error
 				var netErr net.Error
 				if errors.As(reqErr.Unwrap(), &netErr) {
-					// log.Fatalf("Network error:", netErr)
 					// Retry or inform user
 					return "", "", fmt.Errorf("network error: %w", err)
 				}
 			} else if errors.Is(err, context.DeadlineExceeded) {
 				return "", "", fmt.Errorf("context error: %w", err)
 			} else {
-				// fmt.Println("Other error:", err)
-				// Handle other errors
 				log.Fatalf("Failed to scan DynamoDB table: %v", err)
 			}
 		}
@@ -239,15 +226,13 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 
 		lastEvaluatedKey = result.LastEvaluatedKey
 		if lastEvaluatedKey == nil {
-			// No more items to scan
-			break
+			break // No more items to scan
 		}
 	}
 
-	// fmt.Printf("Total Consumed Capacity Units: %.2f\n", totalConsumedCapacity)
+	// fmt.Printf("Total Consumed Capacity Units: %.2f", totalConsumedCapacity)
 
 	if len(allItems) == 0 {
-		// fmt.Printf("Table '%s' is empty.\n", tableName)
 		return "", "", nil
 	}
 
@@ -260,74 +245,89 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 
 	latestItem := allItems[0] // The first item after sorting is the latest
 
-	// fmt.Printf("\nGlobally Latest Item Found:\n")
-	// fmt.Printf("  Partition Key: %s\n", latestItem.UserId)
-	// fmt.Printf("  Timestamp: %s\n", latestItem.Timestamp)
-
     return latestItem.Timestamp, latestItem.UserId, nil
 }
 
-// func handleFirstSync(m *mainModel) string {
+func handleSync(m *mainModel) {
+	// var tickerViewContent string
+
+	// Get the last 12 months of costs
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Printf("Error loading AWS config: %v", err)
+		return
+	}
 	
-// }
+	costExplorerClient := costexplorer.NewFromConfig(cfg)
+	
+	end := time.Now()
+	start := end.AddDate(0, -12, 0)
+	
+	ceInput := &costexplorer.GetCostAndUsageInput{
+		TimePeriod: &cetypes.DateInterval{
+			Start: aws.String(start.Format("2006-01-02")),
+			End:   aws.String(end.Format("2006-01-02")),
+		},
+		Granularity: cetypes.GranularityMonthly,
+		Metrics:     []string{"UnblendedCost"},
+		Filter: &cetypes.Expression{
+			Tags: &cetypes.TagValues{
+				Key:    aws.String("Project"),
+				Values: []string{"Obsyncian"},
+			},
+		},
+	}
+	
+	ceResult, err := costExplorerClient.GetCostAndUsage(context.TODO(), ceInput)
+	if err != nil {
+		log.Printf("Error getting cost data: %v", err)
+		return
+	}
 
-func handleSync(m *mainModel) string {
-	var tickerViewContent string
+	var costs strings.Builder
+	costs.WriteString("AWS Costs for Obsyncian Project:\n\n")
+	
+	for _, data := range ceResult.ResultsByTime {
+		cost := *data.Total["UnblendedCost"].Amount
+		period := *data.TimePeriod.Start
+		costs.WriteString(fmt.Sprintf("%s: $%s\n", period, cost))
+	}
 
-	// Update textView with sample scrollable content
-	sampleContent := `This is a scrollable text view.
+	// Update textView with cost data
+	sampleContent := costs.String()
 
-You can navigate using:
-- Arrow keys (up/down) or k/j to scroll line by line
-- Page Up/Page Down to scroll by pages
+	// // Previous content was: This is a scrollable text view.
+	// // You can navigate using:
+	// - Arrow keys (up/down) or k/j to scroll line by line
+	// - Page Up/Page Down to scroll by pages
 
-Here's some sample content to demonstrate scrolling:
+	// Here's some sample content to demonstrate scrolling:
 
-Line 1: Configuration Details
-Line 2: Local Path: ` + m.config.Local + `
-Line 3: Cloud Path: ` + m.config.Cloud + `
-Line 4: Provider: ` + m.config.Provider + `
-Line 5: User ID: ` + m.config.ID + `
+	// Line 1: Configuration Details
+	// Line 2: Local Path: ` + m.config.Local + `
+	// Line 3: Cloud Path: ` + m.config.Cloud + `
+	// Line 4: Provider: ` + m.config.Provider + `
+	// Line 5: User ID: ` + m.config.ID + `
 
-Line 6: Sync Status Information
-Line 7: Last sync timestamp will appear here
-Line 8: 
-Line 9: Cost Explorer Data
-Line 10: This will show AWS cost data
-Line 11: 
-Line 12: Recent Sync Activities
-Line 13: Upload activities
-Line 14: Download activities
-Line 15: 
-Line 16: System Information
-Line 17: Memory usage
-Line 18: Network status
-Line 19: 
-Line 20: Additional Information
-Line 21: Debug information
-Line 22: Error logs
-Line 23: Performance metrics
-Line 24: 
-Line 25: End of content - scroll up to see more`
+	// Line 6: Sync Status Information`
 
 	m.updateTextViewContent(sampleContent)
 
-	tickerViewContent = fmt.Sprintf("Last updated: %v", time.Now().Format(time.RFC1123))
+	m.appendOutput(fmt.Sprintf("🚀Last local sync: %v", time.Now().Format(time.RFC1123)))
 
 	latest_sync, latest_sync_id, err := get_latest_sync(tableName, m.svc)
 	if err != nil {
-		// log.Fatalf("failed to get latest sync from DynamoDB, %v", err)
-		tickerViewContent = fmt.Sprintf("Error getting latest sync time: %v\n", err)
-		return tickerViewContent
+		m.appendOutput(fmt.Sprintf("❗Error getting latest sync time: %v", err))
+		return
 	}
-	tickerViewContent += fmt.Sprintf("\n LATEST CLOUD SYNC: %v \n", latest_sync)
+	m.appendOutput(fmt.Sprintf("Latest cloud sync: %v", latest_sync))
 
 	if latest_sync == "" {
-		tickerViewContent += "Table is empty. Syncing up...\n"
+		m.appendOutput("Table is empty. Syncing up...")
 		Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
-		tickerViewContent += "Finished syncing.\n"
+		m.appendOutput("Finished syncing.")
 		create_user(m.config.ID, tableName, m.svc)
-		return tickerViewContent // TODO should we be returning here?
+		return
 	}
 
 	// Check our user
@@ -339,45 +339,43 @@ Line 25: End of content - scroll up to see more`
 	}
 	result, err := m.svc.GetItem(context.TODO(), input)
 	if err != nil {
-		log.Fatalf("failed to get item from DynamoDB, %v", err)
+		m.appendOutput(fmt.Sprintf("❗failed to get item from DynamoDB, %v", err))
 	}
 
 	if result.Item == nil {
-		tickerViewContent += fmt.Sprintf("No item found with UUID: %s in table: %s\n", m.config.ID, tableName)
+		m.appendOutput(fmt.Sprintf("No item found with UUID: %s in table: %s", m.config.ID, tableName))
 		create_user(m.config.ID, tableName, m.svc)
-		tickerViewContent += "Syncing down...\n"
+		m.appendOutput("Syncing down...")
 		Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
-		tickerViewContent += "Finished syncing.\n"
-		return tickerViewContent
+		m.appendOutput("Finished syncing.")
+		return
 	}
 
 	var item Item
 	err = attributevalue.UnmarshalMap(result.Item, &item)
 	if err != nil {
-		log.Fatalf("failed to unmarshal DynamoDB item, %v", err)
+		m.appendOutput(fmt.Sprintf("failed to unmarshal DynamoDB item, %v", err))
 	}
 
-	// tickerViewContent += fmt.Sprintf("Our ID: %v latest ID: %v latest t: %v latest t synced: %v \n", m.config.ID, item.UserId, latest_sync, m.latest_ts_synced)
-
 	if m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync {
-		tickerViewContent += "Not synced with Cloud. Syncing down...\n"
+		m.appendOutput("Not synced with Cloud. Syncing down...")
 		changes, _ := Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials) // TODO check this works
-		tickerViewContent += changes
+		m.appendOutput(changes)
 		m.latest_ts_synced = latest_sync
 	} else {
-		tickerViewContent += "Already synced with Cloud\n"
+		m.appendOutput("Already synced with Cloud")
 	}
 
 	isChanges, plannedChanges, _ := SyncDryRun(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
 	if isChanges {
-		tickerViewContent += fmt.Sprintf("Local changes detected. Syncing up:\n %v \n", plannedChanges)
+		m.appendOutput(fmt.Sprintf("Local changes detected. Syncing up:\n %v", plannedChanges))
 		Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
 
 		// Update timestamp in table
 		update := expression.Set(expression.Name("Timestamp"), expression.Value(time.Now().Format("20060102150405")))
 		expr, err := expression.NewBuilder().WithUpdate(update).Build()
 		if err != nil {
-			log.Printf("Couldn't build expression. Here's why: %v\n", err)
+			m.appendOutput(fmt.Sprintf("❗Couldn't build expression. Here's why: %v", err))
 		}
 		putInput := &dynamodb.UpdateItemInput{
 			TableName: aws.String(tableName),
@@ -391,11 +389,9 @@ Line 25: End of content - scroll up to see more`
 		}
 		_, err = m.svc.UpdateItem(context.TODO(), putInput)
 		if err != nil {
-			log.Printf("Couldn't update item. Here's why: %v\n", err)
+			m.appendOutput(fmt.Sprintf("❗Couldn't update item. Here's why: %v", err))
 		}
 	} else {
-		tickerViewContent += "No changes to sync\n"
+		m.appendOutput("No changes to sync")
 	}
-
-	return tickerViewContent
 }
