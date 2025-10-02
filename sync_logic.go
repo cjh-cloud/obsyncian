@@ -18,6 +18,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/costexplorer"
 	cetypes "github.com/aws/aws-sdk-go-v2/service/costexplorer/types"
@@ -252,7 +253,11 @@ func handleSync(m *mainModel) {
 	// var tickerViewContent string
 
 	// Get the last 12 months of costs
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	// cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(m.config.Credentials.Key, m.config.Credentials.Secret, "")),
+		config.WithRegion("us-east-1"), // TODO: This should be moved to the config file
+	)
 	if err != nil {
 		log.Printf("Error loading AWS config: %v", err)
 		return
@@ -295,21 +300,6 @@ func handleSync(m *mainModel) {
 
 	// Update textView with cost data
 	sampleContent := costs.String()
-
-	// // Previous content was: This is a scrollable text view.
-	// // You can navigate using:
-	// - Arrow keys (up/down) or k/j to scroll line by line
-	// - Page Up/Page Down to scroll by pages
-
-	// Here's some sample content to demonstrate scrolling:
-
-	// Line 1: Configuration Details
-	// Line 2: Local Path: ` + m.config.Local + `
-	// Line 3: Cloud Path: ` + m.config.Cloud + `
-	// Line 4: Provider: ` + m.config.Provider + `
-	// Line 5: User ID: ` + m.config.ID + `
-
-	// Line 6: Sync Status Information`
 
 	m.updateTextViewContent(sampleContent)
 

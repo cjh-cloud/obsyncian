@@ -3,65 +3,65 @@
 # KMS Key
 data "aws_caller_identity" "current" {}
 
-resource "aws_kms_key" "obsyncian" {
-  description             = "An example symmetric encryption KMS key"
-  enable_key_rotation     = true
-  deletion_window_in_days = 20
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Id      = "obsyncian"
-    Statement = [
-      {
-        Sid    = "Enable IAM User Permissions"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-        },
-        Action   = "kms:*"
-        Resource = "*"
-      }#,
-    #   {
-    #     Sid    = "Allow administration of the key"
-    #     Effect = "Allow"
-    #     Principal = {
-    #       AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/pulumi"
-    #     },
-    #     Action = [
-    #       "kms:ReplicateKey",
-    #       "kms:Create*",
-    #       "kms:Describe*",
-    #       "kms:Enable*",
-    #       "kms:List*",
-    #       "kms:Put*",
-    #       "kms:Update*",
-    #       "kms:Revoke*",
-    #       "kms:Disable*",
-    #       "kms:Get*",
-    #       "kms:Delete*",
-    #       "kms:ScheduleKeyDeletion",
-    #       "kms:CancelKeyDeletion"
-    #     ],
-    #     Resource = "*"
-    #   },
-    #   {
-    #     Sid    = "Allow use of the key"
-    #     Effect = "Allow"
-    #     Principal = {
-    #       AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/obsyncian"
-    #     },
-    #     Action = [
-    #       "kms:DescribeKey",
-    #       "kms:Encrypt",
-    #       "kms:Decrypt",
-    #       "kms:ReEncrypt*",
-    #       "kms:GenerateDataKey",
-    #       "kms:GenerateDataKeyWithoutPlaintext"
-    #     ],
-    #     Resource = "*"
-    #   }
-    ]
-  })
-}
+# resource "aws_kms_key" "obsyncian" {
+#   description             = "An example symmetric encryption KMS key"
+#   enable_key_rotation     = true
+#   deletion_window_in_days = 20
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Id      = "obsyncian"
+#     Statement = [
+#       {
+#         Sid    = "Enable IAM User Permissions"
+#         Effect = "Allow"
+#         Principal = {
+#           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+#         },
+#         Action   = "kms:*"
+#         Resource = "*"
+#       }#,
+#     #   {
+#     #     Sid    = "Allow administration of the key"
+#     #     Effect = "Allow"
+#     #     Principal = {
+#     #       AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/pulumi"
+#     #     },
+#     #     Action = [
+#     #       "kms:ReplicateKey",
+#     #       "kms:Create*",
+#     #       "kms:Describe*",
+#     #       "kms:Enable*",
+#     #       "kms:List*",
+#     #       "kms:Put*",
+#     #       "kms:Update*",
+#     #       "kms:Revoke*",
+#     #       "kms:Disable*",
+#     #       "kms:Get*",
+#     #       "kms:Delete*",
+#     #       "kms:ScheduleKeyDeletion",
+#     #       "kms:CancelKeyDeletion"
+#     #     ],
+#     #     Resource = "*"
+#     #   },
+#     #   {
+#     #     Sid    = "Allow use of the key"
+#     #     Effect = "Allow"
+#     #     Principal = {
+#     #       AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:user/obsyncian"
+#     #     },
+#     #     Action = [
+#     #       "kms:DescribeKey",
+#     #       "kms:Encrypt",
+#     #       "kms:Decrypt",
+#     #       "kms:ReEncrypt*",
+#     #       "kms:GenerateDataKey",
+#     #       "kms:GenerateDataKeyWithoutPlaintext"
+#     #     ],
+#     #     Resource = "*"
+#     #   }
+#     ]
+#   })
+# }
 
 # S3 bucket
 resource "aws_s3_bucket" "obsyncian" {
@@ -131,11 +131,17 @@ data "aws_iam_policy_document" "obsyncian" {
     resources = ["*"]
   }
 
-#   statement {
-#     effect    = "Allow"
-#     actions   = ["KMS:*"]
-#     resources = ["*"]
-#   }
+  statement {
+    effect    = "Allow"
+    actions   = ["ce:*"]
+    resources = ["*"]
+  }
+
+  #   statement {
+  #     effect    = "Allow"
+  #     actions   = ["KMS:*"]
+  #     resources = ["*"]
+  #   }
 }
 
 resource "aws_iam_user_policy" "obsyncian" {
