@@ -73,6 +73,11 @@ type SyncCompleteMsg struct {
 	Error   error
 }
 
+// SyncedDownMsg is sent when sync down completes to update the tracked timestamp
+type SyncedDownMsg struct {
+	Timestamp string
+}
+
 type FileChangeMsg struct{}
 
 type CloudCheckMsg struct{}
@@ -236,7 +241,8 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 }
 
 // handleSyncAsync performs sync operations asynchronously and sends progress to the Bubble Tea program
-func handleSyncAsync(m *mainModel, p *tea.Program) {
+// lastSyncedTs is passed from the model to avoid reading stale state from a copy
+func handleSyncAsync(m *mainModel, p *tea.Program, lastSyncedTs string) {
 	// Send initial progress
 	p.Send(SyncProgressMsg{Text: fmt.Sprintf("🚀 Last local sync: %v", time.Now().Format(time.RFC1123))})
 
@@ -270,7 +276,7 @@ func handleSyncAsync(m *mainModel, p *tea.Program) {
 		p.Send(SyncProgressMsg{Text: fmt.Sprintf("No item found with UUID: %s in table: %s", m.config.ID, tableName)})
 		create_user(m.config.ID, tableName, m.svc)
 		p.Send(SyncProgressMsg{Text: "Syncing down..."})
-		runAsyncSyncDown(m, p, false)
+		runAsyncSyncDown(m, p, latest_sync, false)
 		return
 	}
 
@@ -280,11 +286,11 @@ func handleSyncAsync(m *mainModel, p *tea.Program) {
 		p.Send(SyncProgressMsg{Text: fmt.Sprintf("Failed to unmarshal DynamoDB item, %v", err)})
 	}
 
-	// Check if we need to sync down
-	needsSyncDown := m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && m.latest_ts_synced < latest_sync
+	// Check if we need to sync down - use passed lastSyncedTs instead of m.latest_ts_synced
+	needsSyncDown := m.config.ID != latest_sync_id && latest_sync >= item.Timestamp && lastSyncedTs < latest_sync
 	if needsSyncDown {
 		p.Send(SyncProgressMsg{Text: "Not synced with Cloud. Syncing down..."})
-		runAsyncSyncDown(m, p, true)
+		runAsyncSyncDown(m, p, latest_sync, true)
 		return
 	}
 
@@ -295,7 +301,8 @@ func handleSyncAsync(m *mainModel, p *tea.Program) {
 }
 
 // runAsyncSyncDown syncs from cloud to local asynchronously
-func runAsyncSyncDown(m *mainModel, p *tea.Program, checkLocalAfter bool) {
+// latestSyncTs is the timestamp of the cloud version we're syncing - stored to prevent re-syncing
+func runAsyncSyncDown(m *mainModel, p *tea.Program, latestSyncTs string, checkLocalAfter bool) {
 	outputChan := make(chan string, 100)
 	doneChan := make(chan SyncResult, 1)
 
@@ -318,6 +325,8 @@ func runAsyncSyncDown(m *mainModel, p *tea.Program, checkLocalAfter bool) {
 							p.Send(SyncProgressMsg{Text: fmt.Sprintf("❗ Sync down error: %v", result.Err)})
 							p.Send(SyncCompleteMsg{Success: false, Error: result.Err})
 						} else {
+							// Send message to update the timestamp (must be done via message for Bubble Tea)
+							p.Send(SyncedDownMsg{Timestamp: latestSyncTs})
 							p.Send(SyncProgressMsg{Text: "✅ Finished syncing down."})
 							if checkLocalAfter {
 								checkLocalChangesAsync(m, p)

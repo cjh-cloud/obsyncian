@@ -255,6 +255,10 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Real-time sync progress updates
 		m.appendOutput(msg.Text)
 
+	case SyncedDownMsg:
+		// Update the timestamp to track which cloud version we've synced
+		m.latest_ts_synced = msg.Timestamp
+
 	case SyncCompleteMsg:
 		// Sync operation completed
 		m.syncState = SyncIdle
@@ -270,7 +274,9 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.syncState == SyncIdle && m.program != nil {
 			m.syncState = SyncInProgress
 			m.appendOutput("📁 File change detected, starting sync...")
-			go handleSyncAsync(&m, m.program)
+			// Pass current lastSyncedTs to avoid reading stale state in goroutine
+			lastSynced := m.latest_ts_synced
+			go handleSyncAsync(&m, m.program, lastSynced)
 		} else if m.syncState == SyncInProgress {
 			m.appendOutput("⏳ Sync already in progress, will check again after completion")
 		}
@@ -280,7 +286,9 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.syncState == SyncIdle && m.program != nil {
 			m.syncState = SyncInProgress
 			m.appendOutput("☁️  Checking for cloud changes...")
-			go handleSyncAsync(&m, m.program)
+			// Pass current lastSyncedTs to avoid reading stale state in goroutine
+			lastSynced := m.latest_ts_synced
+			go handleSyncAsync(&m, m.program, lastSynced)
 		}
 
 	case timer.TickMsg:
@@ -298,7 +306,8 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.syncState == SyncIdle && m.program != nil {
 			m.syncState = SyncInProgress
 			m.appendOutput("☁️  Periodic cloud check...")
-			go handleSyncAsync(&m, m.program)
+			lastSynced := m.latest_ts_synced
+			go handleSyncAsync(&m, m.program, lastSynced)
 		}
 
 		if m.timer.Timedout() {
