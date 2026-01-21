@@ -137,6 +137,33 @@ data "aws_iam_policy_document" "obsyncian" {
     resources = ["*"]
   }
 
+  # SQS permissions for event-driven sync
+  statement {
+    effect = "Allow"
+    actions = [
+      "sqs:CreateQueue",
+      "sqs:DeleteQueue",
+      "sqs:GetQueueUrl",
+      "sqs:GetQueueAttributes",
+      "sqs:SetQueueAttributes",
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:PurgeQueue"
+    ]
+    resources = ["arn:aws:sqs:*:${data.aws_caller_identity.current.account_id}:obsyncian-*"]
+  }
+
+  # SNS permissions for subscribing to sync notifications
+  statement {
+    effect = "Allow"
+    actions = [
+      "sns:Subscribe",
+      "sns:Unsubscribe",
+      "sns:GetTopicAttributes"
+    ]
+    resources = ["arn:aws:sns:*:${data.aws_caller_identity.current.account_id}:obsyncian-sync-notifications"]
+  }
+
   #   statement {
   #     effect    = "Allow"
   #     actions   = ["KMS:*"]
@@ -148,4 +175,86 @@ resource "aws_iam_user_policy" "obsyncian" {
   name   = "obsyncian"
   user   = aws_iam_user.obsyncian.name
   policy = data.aws_iam_policy_document.obsyncian.json
+}
+
+# =============================================================================
+# Event-Driven Sync Infrastructure
+# =============================================================================
+
+# Enable EventBridge notifications for S3 bucket
+resource "aws_s3_bucket_notification" "obsyncian" {
+  bucket      = aws_s3_bucket.obsyncian.id
+  eventbridge = true
+}
+
+# SNS Topic for sync notifications (fan-out to multiple devices)
+resource "aws_sns_topic" "obsyncian_sync" {
+  name = "obsyncian-sync-notifications"
+}
+
+# SNS Topic policy to allow EventBridge to publish
+resource "aws_sns_topic_policy" "obsyncian_sync" {
+  arn    = aws_sns_topic.obsyncian_sync.arn
+  policy = data.aws_iam_policy_document.sns_topic_policy.json
+}
+
+data "aws_iam_policy_document" "sns_topic_policy" {
+  statement {
+    sid    = "AllowEventBridgePublish"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["events.amazonaws.com"]
+    }
+    actions   = ["sns:Publish"]
+    resources = [aws_sns_topic.obsyncian_sync.arn]
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_cloudwatch_event_rule.s3_sync_events.arn]
+    }
+  }
+
+  statement {
+    sid    = "AllowObsyncianUserSubscribe"
+    effect = "Allow"
+    principals {
+      type        = "AWS"
+      identifiers = [aws_iam_user.obsyncian.arn]
+    }
+    actions = [
+      "sns:Subscribe",
+      "sns:Receive"
+    ]
+    resources = [aws_sns_topic.obsyncian_sync.arn]
+  }
+}
+
+# EventBridge rule to catch S3 object changes
+resource "aws_cloudwatch_event_rule" "s3_sync_events" {
+  name        = "obsyncian-s3-sync-events"
+  description = "Capture S3 object changes for Obsyncian sync notifications"
+
+  event_pattern = jsonencode({
+    source      = ["aws.s3"]
+    detail-type = ["Object Created", "Object Deleted"]
+    detail = {
+      bucket = {
+        name = [aws_s3_bucket.obsyncian.id]
+      }
+    }
+  })
+}
+
+# EventBridge target to send events to SNS
+resource "aws_cloudwatch_event_target" "sns_target" {
+  rule      = aws_cloudwatch_event_rule.s3_sync_events.name
+  target_id = "SendToSNS"
+  arn       = aws_sns_topic.obsyncian_sync.arn
+}
+
+# Output the SNS topic ARN for the client to use
+output "sns_topic_arn" {
+  value       = aws_sns_topic.obsyncian_sync.arn
+  description = "SNS topic ARN for sync notifications"
 }

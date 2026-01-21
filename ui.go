@@ -34,7 +34,7 @@ const (
 	tabText
 )
 
-// Cloud check interval - check for remote changes every 5 minutes
+// Cloud check interval - fallback polling interval when SQS is not configured
 const cloudCheckInterval = 5 * time.Minute
 
 // File watcher debounce time
@@ -56,7 +56,9 @@ type mainModel struct {
 	outputBuffer     *bytes.Buffer
 	syncState        SyncState
 	fileWatcher      *FileWatcher
-	program          *tea.Program // Reference to send messages from background goroutines
+	sqsListener      *SQSListener  // SQS listener for event-driven sync (nil if not configured)
+	useEventDriven   bool          // true if using SQS notifications, false for polling
+	program          *tea.Program  // Reference to send messages from background goroutines
 }
 
 func (m *mainModel) appendOutput(text string) {
@@ -123,11 +125,14 @@ func initialModel() mainModel {
 
 	outputBuffer := &bytes.Buffer{}
 
+	// Check if event-driven sync is configured
+	useEventDriven := obsyncianConfig.SNSTopicARN != ""
+
 	return mainModel{
 		tableView:        t,
 		textView:         vp,
 		tickerView:       tickerVp,
-		timer:            timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval), // Cloud check timer
+		timer:            timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval), // Cloud check timer (fallback)
 		textInput:        ti,
 		focus:            focusTabs,
 		currentTab:       tabTable,
@@ -138,20 +143,28 @@ func initialModel() mainModel {
 		outputBuffer:     outputBuffer,
 		syncState:        SyncIdle,
 		fileWatcher:      nil, // Will be initialized after program starts
+		sqsListener:      nil, // Will be initialized after program starts (if SNS configured)
+		useEventDriven:   useEventDriven,
 		program:          nil, // Will be set after program starts
 	}
 }
 
 func (m mainModel) Init() tea.Cmd {
-	// Return a batch of commands: start timer and trigger initial sync
-	return tea.Batch(
-		m.timer.Init(),
+	cmds := []tea.Cmd{
+		// Trigger initial sync
 		func() tea.Msg {
 			// Small delay to allow program reference to be set
 			time.Sleep(100 * time.Millisecond)
 			return CloudCheckMsg{}
 		},
-	)
+	}
+
+	// Only start the timer if not using event-driven sync
+	if !m.useEventDriven {
+		cmds = append(cmds, m.timer.Init())
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -163,9 +176,12 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if !m.editing {
-				// Clean up file watcher before quitting
+				// Clean up resources before quitting
 				if m.fileWatcher != nil {
 					m.fileWatcher.Stop()
+				}
+				if m.sqsListener != nil {
+					m.sqsListener.Stop()
 				}
 				return m, tea.Quit
 			}
@@ -282,42 +298,51 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case CloudCheckMsg:
-		// Periodic cloud check - check for remote changes
+		// Cloud check - triggered by SQS notification or periodic polling
 		if m.syncState == SyncIdle && m.program != nil {
 			m.syncState = SyncInProgress
-			m.appendOutput("☁️  Checking for cloud changes...")
+			if m.useEventDriven {
+				m.appendOutput("📬 S3 change notification received, checking cloud...")
+			} else {
+				m.appendOutput("☁️  Checking for cloud changes...")
+			}
 			// Pass current lastSyncedTs to avoid reading stale state in goroutine
 			lastSynced := m.latest_ts_synced
 			go handleSyncAsync(&m, m.program, lastSynced)
 		}
 
 	case timer.TickMsg:
-		m.timer, cmd = m.timer.Update(msg)
-		cmds = append(cmds, cmd)
+		// Only handle timer events if using polling mode (not event-driven)
+		if !m.useEventDriven {
+			m.timer, cmd = m.timer.Update(msg)
+			cmds = append(cmds, cmd)
 
-		// Skip the first cycle (initialization)
-		if m.firstCycle < 1 {
-			m.firstCycle = m.firstCycle + 1
-			m.tickerView.SetContent("Starting up...")
-			return m, tea.Batch(cmds...)
-		}
+			// Skip the first cycle (initialization)
+			if m.firstCycle < 1 {
+				m.firstCycle = m.firstCycle + 1
+				m.tickerView.SetContent("Starting up...")
+				return m, tea.Batch(cmds...)
+			}
 
-		// Periodic cloud check
-		if m.syncState == SyncIdle && m.program != nil {
-			m.syncState = SyncInProgress
-			m.appendOutput("☁️  Periodic cloud check...")
-			lastSynced := m.latest_ts_synced
-			go handleSyncAsync(&m, m.program, lastSynced)
-		}
+			// Periodic cloud check
+			if m.syncState == SyncIdle && m.program != nil {
+				m.syncState = SyncInProgress
+				m.appendOutput("☁️  Periodic cloud check...")
+				lastSynced := m.latest_ts_synced
+				go handleSyncAsync(&m, m.program, lastSynced)
+			}
 
-		if m.timer.Timedout() {
-			m.timer = timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval)
-			cmds = append(cmds, m.timer.Init())
+			if m.timer.Timedout() {
+				m.timer = timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval)
+				cmds = append(cmds, m.timer.Init())
+			}
 		}
 
 	case timer.StartStopMsg:
-		m.timer, cmd = m.timer.Update(msg)
-		cmds = append(cmds, m.timer.Init())
+		if !m.useEventDriven {
+			m.timer, cmd = m.timer.Update(msg)
+			cmds = append(cmds, m.timer.Init())
+		}
 	}
 
 	if m.editing {
@@ -451,16 +476,40 @@ func main() {
 		watcher.Start()
 	}
 
+	// Initialize SQS listener if SNS topic is configured (event-driven sync)
+	if model.useEventDriven {
+		sqsListener, err := NewSQSListener(
+			model.config.Credentials,
+			model.config.SNSTopicARN,
+			model.config.ID,
+			p,
+		)
+		if err != nil {
+			log.Printf("Warning: Could not start SQS listener: %v. Falling back to polling.", err)
+			model.useEventDriven = false
+		} else {
+			model.sqsListener = sqsListener
+			sqsListener.Start()
+			log.Printf("Event-driven sync enabled via SQS")
+		}
+	}
+
 	if _, err := p.Run(); err != nil {
-		// Clean up file watcher on error
+		// Clean up resources on error
 		if model.fileWatcher != nil {
 			model.fileWatcher.Stop()
+		}
+		if model.sqsListener != nil {
+			model.sqsListener.Stop()
 		}
 		log.Fatal(err)
 	}
 
-	// Clean up file watcher on normal exit
+	// Clean up resources on normal exit
 	if model.fileWatcher != nil {
 		model.fileWatcher.Stop()
+	}
+	if model.sqsListener != nil {
+		model.sqsListener.Stop()
 	}
 }

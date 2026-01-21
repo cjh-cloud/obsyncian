@@ -44,8 +44,9 @@ type Credentials struct {
 type ObsyncianConfig struct {
 	ID          string      `json:"id"`
 	Local       string      `json:"local"`
-	Cloud       string      `json:"cloud"`    // cloud path, bucket?
-	Provider    string      `json:"provider"` // only AWS allowed for starters
+	Cloud       string      `json:"cloud"`       // cloud path, bucket?
+	Provider    string      `json:"provider"`    // only AWS allowed for starters
+	SNSTopicARN string      `json:"snsTopicArn"` // SNS topic ARN for sync notifications
 	Credentials Credentials `json:"credentials"`
 }
 
@@ -151,6 +152,13 @@ func configure_local() ObsyncianConfig {
 				huh.NewOption("Google Cloud", "GCP"),
 			).
 			Value(&obsyncianConfig.Provider).
+			Run()
+	}
+
+	if obsyncianConfig.SNSTopicARN == "" {
+		huh.NewInput().
+			Title("What's your SNS Topic ARN for sync notifications? (optional, leave empty to use polling)").
+			Value(&obsyncianConfig.SNSTopicARN).
 			Run()
 	}
 
