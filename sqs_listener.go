@@ -32,6 +32,8 @@ type SQSListener struct {
 	deviceID        string
 	program         *tea.Program
 	stopChan        chan struct{}
+	ctx             context.Context
+	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	mu              sync.Mutex
 	running         bool
@@ -79,6 +81,8 @@ func NewSQSListener(awsCredentials Credentials, snsTopicARN string, deviceID str
 	sqsClient := sqs.NewFromConfig(cfg)
 	snsClient := sns.NewFromConfig(cfg)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	listener := &SQSListener{
 		sqsClient:   sqsClient,
 		snsClient:   snsClient,
@@ -86,6 +90,8 @@ func NewSQSListener(awsCredentials Credentials, snsTopicARN string, deviceID str
 		deviceID:    deviceID,
 		program:     program,
 		stopChan:    make(chan struct{}),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 
 	// Create the SQS queue
@@ -208,7 +214,8 @@ func (l *SQSListener) pollMessages() {
 
 // receiveAndProcessMessages receives messages from SQS and processes them
 func (l *SQSListener) receiveAndProcessMessages() {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	// Use the listener's cancellable context with a timeout for the request
+	ctx, cancel := context.WithTimeout(l.ctx, 25*time.Second)
 	defer cancel()
 
 	result, err := l.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
@@ -217,6 +224,10 @@ func (l *SQSListener) receiveAndProcessMessages() {
 		WaitTimeSeconds:     20, // Long polling
 	})
 	if err != nil {
+		// Check if we were cancelled (shutting down) - don't log this as an error
+		if l.ctx.Err() != nil {
+			return
+		}
 		// Log error but continue polling (could be transient)
 		log.Printf("SQS receive error: %v", err)
 		return
@@ -313,10 +324,13 @@ func (l *SQSListener) Stop() {
 	}
 	l.mu.Unlock()
 
+	// Cancel the context to immediately abort any in-flight SQS requests
+	l.cancel()
+
 	// Signal the polling goroutine to stop
 	close(l.stopChan)
 
-	// Wait for the polling goroutine to finish
+	// Wait for the polling goroutine to finish (should be immediate now)
 	l.wg.Wait()
 
 	// Unsubscribe from SNS
