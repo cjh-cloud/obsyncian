@@ -16,6 +16,7 @@ type FileWatcher struct {
 	debounceTime time.Duration
 	onChange     func()
 	stopChan     chan struct{}
+	stopOnce     sync.Once
 	mu           sync.Mutex
 	timer        *time.Timer
 }
@@ -121,14 +122,16 @@ func (fw *FileWatcher) triggerDebounced() {
 	})
 }
 
-// Stop stops the file watcher
+// Stop stops the file watcher (safe to call multiple times)
 func (fw *FileWatcher) Stop() {
-	close(fw.stopChan)
-	fw.watcher.Close()
+	fw.stopOnce.Do(func() {
+		close(fw.stopChan)
+		fw.watcher.Close()
 
-	fw.mu.Lock()
-	if fw.timer != nil {
-		fw.timer.Stop()
-	}
-	fw.mu.Unlock()
+		fw.mu.Lock()
+		if fw.timer != nil {
+			fw.timer.Stop()
+		}
+		fw.mu.Unlock()
+	})
 }
