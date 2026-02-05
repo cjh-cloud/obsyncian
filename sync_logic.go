@@ -42,12 +42,15 @@ type Credentials struct {
 }
 
 type ObsyncianConfig struct {
-	ID          string      `json:"id"`
-	Local       string      `json:"local"`
-	Cloud       string      `json:"cloud"`       // cloud path, bucket?
-	Provider    string      `json:"provider"`    // only AWS allowed for starters
-	SNSTopicARN string      `json:"snsTopicArn"` // SNS topic ARN for sync notifications
-	Credentials Credentials `json:"credentials"`
+	ID               string      `json:"id"`
+	Local            string      `json:"local"`
+	Cloud            string      `json:"cloud"`            // cloud path, bucket?
+	Provider         string      `json:"provider"`         // only AWS allowed for starters
+	SNSTopicARN      string      `json:"snsTopicArn"`     // SNS topic ARN for sync notifications
+	KnowledgeBaseID  string      `json:"knowledgeBaseId"`  // Bedrock KB for chat (optional)
+	DataSourceID     string      `json:"dataSourceId"`     // Bedrock KB data source (for StartIngestionJob, optional)
+	Region           string      `json:"region"`           // AWS region (default ap-southeast-2)
+	Credentials      Credentials `json:"credentials"`
 }
 
 // Item represents the structure of your DynamoDB table item
@@ -82,6 +85,24 @@ type SyncedDownMsg struct {
 type FileChangeMsg struct{}
 
 type CloudCheckMsg struct{}
+
+// ChatMessage represents one message in the AI chat.
+type ChatMessage struct {
+	Role string // "user" or "assistant"
+	Text string
+}
+
+// AgentResponseMsg is sent when a Bedrock RetrieveAndGenerate call completes.
+type AgentResponseMsg struct {
+	Text string
+	Err  error
+}
+
+// KBSyncResultMsg is sent when a StartIngestionJob (Sync KB) completes or fails.
+type KBSyncResultMsg struct {
+	JobID string
+	Err   error
+}
 
 // Configure the local settings if first time starting, and return the loaded config
 func configure_local() ObsyncianConfig {
@@ -162,6 +183,13 @@ func configure_local() ObsyncianConfig {
 			Run()
 	}
 
+	if obsyncianConfig.KnowledgeBaseID == "" {
+		huh.NewInput().
+			Title("What's your Bedrock Knowledge Base ID for the AI chat? (optional, leave empty to skip)").
+			Value(&obsyncianConfig.KnowledgeBaseID).
+			Run()
+	}
+
 	config_json, err := json.Marshal(obsyncianConfig)
 	check(err)
 	configFileWriter, err := os.Create(path)
@@ -171,6 +199,14 @@ func configure_local() ObsyncianConfig {
 	}
 
 	return obsyncianConfig
+}
+
+// AWSRegion returns the configured AWS region, or ap-southeast-2 if not set.
+func (c *ObsyncianConfig) AWSRegion() string {
+	if c.Region != "" {
+		return c.Region
+	}
+	return "ap-southeast-2"
 }
 
 func create_user(userId string, tableName string, svc *dynamodb.Client) {

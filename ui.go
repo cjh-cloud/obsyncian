@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -46,11 +47,16 @@ type mainModel struct {
 	tickerView       viewport.Model
 	timer            timer.Model
 	textInput        textinput.Model
+	chatInput        textinput.Model
+	chatInputFocused bool // true while typing in chat; Escape blurs, Enter (when empty) can re-focus
+	chatMessages     []ChatMessage
+	chatLoading      bool
 	editing          bool
 	focus            focusState
 	currentTab       tabState
 	config           ObsyncianConfig
 	svc              *dynamodb.Client
+	bedrockClient    *BedrockClient // nil if KnowledgeBaseID not configured
 	latest_ts_synced string
 	firstCycle       int // just used to skip the first time cycle
 	outputBuffer     *bytes.Buffer
@@ -73,7 +79,7 @@ func initialModel() mainModel {
 	obsyncianConfig := configure_local()
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(obsyncianConfig.Credentials.Key, obsyncianConfig.Credentials.Secret, "")),
-		config.WithRegion("ap-southeast-2"), // TODO should be in config file
+		config.WithRegion(obsyncianConfig.AWSRegion()),
 	)
 	if err != nil {
 		log.Fatalf("failed to load AWS config, %v", err)
@@ -117,35 +123,54 @@ func initialModel() mainModel {
 	ti.CharLimit = 80
 	ti.Width = 80
 
-	vp := viewport.New(80, 20) // Width 43, Height 20 lines
-	vp.SetContent("This is a static text view.\n\nDisplay last 3 months of cost from Cost Explorer.")
+	chatTi := textinput.New()
+	chatTi.Placeholder = "Ask about your notes..."
+	chatTi.CharLimit = 500
+	chatTi.Width = 78
 
-	tickerVp := viewport.New(80, 10) // Width 80, Height 10 lines
+	vp := viewport.New(80, 20)
+	vp.SetContent("") // Chat messages rendered in View
+
+	tickerVp := viewport.New(80, 10)
 	tickerVp.SetContent("Initializing... watching for file changes")
 
 	outputBuffer := &bytes.Buffer{}
 
-	// Check if event-driven sync is configured
 	useEventDriven := obsyncianConfig.SNSTopicARN != ""
+
+	var bedrockClient *BedrockClient
+	if obsyncianConfig.KnowledgeBaseID != "" {
+		var err error
+		bedrockClient, err = NewBedrockClient(obsyncianConfig)
+		if err != nil {
+			log.Printf("Bedrock client not available: %v", err)
+			bedrockClient = nil
+		}
+	}
 
 	return mainModel{
 		tableView:        t,
 		textView:         vp,
 		tickerView:       tickerVp,
-		timer:            timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval), // Cloud check timer (fallback)
+		timer:            timer.NewWithInterval(cloudCheckInterval, cloudCheckInterval),
 		textInput:        ti,
+		chatInput:        chatTi,
+		chatMessages:     nil,
+		chatLoading:      false,
+		editing:          false,
 		focus:            focusTabs,
 		currentTab:       tabTable,
 		config:           obsyncianConfig,
 		svc:              svc,
+		bedrockClient:    bedrockClient,
 		latest_ts_synced: "",
 		firstCycle:       0,
 		outputBuffer:     outputBuffer,
 		syncState:        SyncIdle,
-		fileWatcher:      nil, // Will be initialized after program starts
-		sqsListener:      nil, // Will be initialized after program starts (if SNS configured)
+		fileWatcher:      nil,
+		sqsListener:      nil,
 		useEventDriven:   useEventDriven,
-		program:          nil, // Will be set after program starts
+		program:          nil,
 	}
 }
 
@@ -167,13 +192,35 @@ func (m mainModel) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// runBedrockQueryCmd returns a tea.Cmd that runs RetrieveAndGenerate in a goroutine and sends AgentResponseMsg.
+func runBedrockQueryCmd(program *tea.Program, client *BedrockClient, kbID, query, region string) tea.Cmd {
+	return func() tea.Msg {
+		if program == nil || client == nil {
+			return AgentResponseMsg{Err: fmt.Errorf("bedrock not configured")}
+		}
+		go func() {
+			ctx := context.Background()
+			text, err := client.RetrieveAndGenerate(ctx, kbID, query, region)
+			program.Send(AgentResponseMsg{Text: text, Err: err})
+		}()
+		return nil
+	}
+}
+
 func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
+		key := msg.String()
+		// When typing in chat, only Enter and Escape are handled here; all other keys go to chat input
+		chatTyping := m.currentTab == tabText && m.chatInputFocused
+		if chatTyping && key != "enter" && key != "esc" {
+			// Skip app keybindings so s, i, arrows, tab etc. don't fire; key will go to chatInput below
+			break
+		}
+		switch key {
 		case "ctrl+c", "q":
 			if !m.editing {
 				// Clean up resources before quitting
@@ -185,13 +232,24 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, tea.Quit
 			}
-		case "tab", "shift+tab": // these are the same because we only have two things to switch between
+		case "tab", "shift+tab": // switch between top pane (tabs) and bottom pane (ticker)
 			if !m.editing {
-				m.focus = (m.focus + 1) % 2 // switch between tabs and ticker
+				m.focus = (m.focus + 1) % 2
+				if m.focus == focusTicker {
+					m.chatInput.Blur()
+					m.chatInputFocused = false
+				}
 			}
-		case "left", "h", "right", "l": //same because we only have two things to switch between (split out if tabs added)
-			if !m.editing && m.focus == focusTabs {
-				m.currentTab = (m.currentTab + 1) % 2 // switch between tabs
+		case "left", "h", "right", "l": // switch between Table and AI tabs (when not typing in chat)
+			if !m.editing && m.focus == focusTabs && (!m.chatInputFocused || m.currentTab != tabText) {
+				m.currentTab = (m.currentTab + 1) % 2
+				if m.currentTab == tabText {
+					m.chatInput.Focus()
+					m.chatInputFocused = true
+				} else {
+					m.chatInput.Blur()
+					m.chatInputFocused = false
+				}
 			}
 		case "enter":
 			if m.editing {
@@ -205,15 +263,35 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editing = true
 				m.textInput.SetValue(m.tableView.SelectedRow()[1])
 				m.textInput.Focus()
+			} else if m.focus == focusTabs && m.currentTab == tabText && !m.chatLoading {
+				if m.chatInputFocused && m.config.KnowledgeBaseID != "" {
+					query := m.chatInput.Value()
+					if strings.TrimSpace(query) != "" {
+						m.chatMessages = append(m.chatMessages, ChatMessage{Role: "user", Text: query})
+						m.chatInput.Reset()
+						m.chatLoading = true
+						m.updateChatViewContent()
+						cmd = runBedrockQueryCmd(m.program, m.bedrockClient, m.config.KnowledgeBaseID, query, m.config.AWSRegion())
+						return m, cmd
+					}
+				} else {
+					// Re-focus chat so user can type
+					m.chatInput.Focus()
+					m.chatInputFocused = true
+				}
 			}
 		case "esc":
 			if m.editing {
 				m.editing = false
 				m.textInput.Blur()
 				m.textInput.Reset()
+			} else if m.currentTab == tabText && m.chatInputFocused {
+				// Exit chat typing so s, i, tab, arrows work again; press Enter to type again
+				m.chatInput.Blur()
+				m.chatInputFocused = false
 			}
 		case "up", "k":
-			if !m.editing {
+			if !m.editing && (m.currentTab != tabText || !m.chatInputFocused) {
 				switch m.focus {
 				case focusTabs:
 					if m.currentTab == tabTable {
@@ -226,20 +304,20 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "down", "j":
-			if !m.editing {
+			if !m.editing && (m.currentTab != tabText || !m.chatInputFocused) {
 				switch m.focus {
 				case focusTabs:
 					if m.currentTab == tabTable {
 						// Table handles its own navigation
 					} else if m.currentTab == tabText {
-						m.textView.LineUp(1)
+						m.textView.LineDown(1)
 					}
 				case focusTicker:
 					m.tickerView.LineDown(1)
 				}
 			}
 		case "pgup":
-			if !m.editing {
+			if !m.editing && (m.currentTab != tabText || !m.chatInputFocused) {
 				switch m.focus {
 				case focusTabs:
 					if m.currentTab == tabText {
@@ -250,20 +328,34 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "pgdown":
-			if !m.editing {
+			if !m.editing && (m.currentTab != tabText || !m.chatInputFocused) {
 				switch m.focus {
 				case focusTabs:
 					if m.currentTab == tabText {
-						m.textView.ViewUp()
+						m.textView.ViewDown()
 					}
 				case focusTicker:
 					m.tickerView.ViewDown()
 				}
 			}
-		case "s": // Manual sync trigger
-			if !m.editing && m.syncState == SyncIdle {
+		case "s": // Manual sync trigger (not when on chat tab)
+			if !m.editing && m.currentTab != tabText && m.syncState == SyncIdle {
 				m.appendOutput("⚡ Manual sync triggered")
 				return m, func() tea.Msg { return FileChangeMsg{} }
+			}
+		case "i": // Sync KB (not when on chat tab)
+			if !m.editing && m.currentTab != tabText && m.config.KnowledgeBaseID != "" && m.config.DataSourceID != "" && m.program != nil {
+				m.appendOutput("📚 Starting knowledge base sync...")
+				program := m.program
+				cfg := m.config
+				return m, func() tea.Msg {
+					go func() {
+						ctx := context.Background()
+						jobID, err := StartKnowledgeBaseIngestion(ctx, cfg)
+						program.Send(KBSyncResultMsg{JobID: jobID, Err: err})
+					}()
+					return nil
+				}
 			}
 		}
 
@@ -295,6 +387,23 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			go handleSyncAsync(&m, m.program, lastSynced)
 		} else if m.syncState == SyncInProgress {
 			m.appendOutput("⏳ Sync already in progress, will check again after completion")
+		}
+
+	case AgentResponseMsg:
+		m.chatLoading = false
+		if msg.Err != nil {
+			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Text: "Error: " + msg.Err.Error()})
+		} else {
+			m.chatMessages = append(m.chatMessages, ChatMessage{Role: "assistant", Text: msg.Text})
+		}
+		m.updateChatViewContent()
+		return m, nil
+
+	case KBSyncResultMsg:
+		if msg.Err != nil {
+			m.appendOutput(fmt.Sprintf("❗ KB sync failed: %v", msg.Err))
+		} else {
+			m.appendOutput("✓ Knowledge base indexing started (job: " + msg.JobID + ")")
 		}
 
 	case CloudCheckMsg:
@@ -349,13 +458,16 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textInput, cmd = m.textInput.Update(msg)
 		cmds = append(cmds, cmd)
 	} else {
-		// Only update the focused view for navigation
 		switch m.focus {
 		case focusTabs:
 			if m.currentTab == tabTable {
 				m.tableView, cmd = m.tableView.Update(msg)
 				cmds = append(cmds, cmd)
 			} else if m.currentTab == tabText {
+				if m.chatInputFocused {
+					m.chatInput, cmd = m.chatInput.Update(msg)
+					cmds = append(cmds, cmd)
+				}
 				m.textView, cmd = m.textView.Update(msg)
 				cmds = append(cmds, cmd)
 			}
@@ -363,6 +475,10 @@ func (m mainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tickerView, cmd = m.tickerView.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+	}
+
+	if m.currentTab == tabText {
+		m.updateChatViewContent()
 	}
 
 	return m, tea.Batch(cmds...)
@@ -409,7 +525,7 @@ func (m mainModel) View() string {
 			tabContent = m.tableView.View() + "\nPress 'enter' to edit."
 		}
 	} else {
-		tabContent = m.textView.View()
+		tabContent = m.textView.View() + "\n" + m.chatInput.View()
 	}
 
 	// Apply focus styling to the entire tab area
@@ -439,7 +555,7 @@ func (m mainModel) View() string {
 	finalView := lipgloss.JoinVertical(lipgloss.Left, tabView, bottomView)
 
 	// Add help text
-	helpText := "\nTab: Switch panes | ←/→: Switch tabs | ↑/↓: Scroll | PgUp/PgDn: Page scroll | S: Manual sync | Enter: Edit (table) | Esc: Cancel edit | Ctrl+C/Q: Quit"
+	helpText := "\nTab: Switch panes (tabs ↔ log) | ←/→: Switch tabs | ↑/↓: Scroll | Esc: Leave chat (then ←/→ or Tab) | S: Sync | I: Sync KB | Ctrl+C/Q: Quit"
 
 	return viewContainerStyle.Render(finalView + helpText)
 }
@@ -447,6 +563,40 @@ func (m mainModel) View() string {
 // updateTextViewContent updates the content of the textView viewport
 func (m *mainModel) updateTextViewContent(content string) {
 	m.textView.SetContent(content)
+}
+
+// chatContentWidth is the wrap width for chat text in the viewport (80-wide viewport minus border/padding).
+const chatContentWidth = 76
+
+// wrapChatLine wraps s to chatContentWidth so long lines (e.g. error messages) are visible in the viewport.
+func wrapChatLine(s string) string {
+	return lipgloss.NewStyle().Width(chatContentWidth).Render(s)
+}
+
+// updateChatViewContent builds chat message list into a string and sets it on the text viewport.
+func (m *mainModel) updateChatViewContent() {
+	if len(m.chatMessages) == 0 && !m.chatLoading {
+		if m.config.KnowledgeBaseID == "" {
+			m.textView.SetContent("Add knowledgeBaseId to your config to chat with your notes.")
+		} else {
+			m.textView.SetContent("Ask a question about your notes below.")
+		}
+		return
+	}
+	var b bytes.Buffer
+	for _, msg := range m.chatMessages {
+		prefix := "You: "
+		if msg.Role == "assistant" {
+			prefix = "Agent: "
+		}
+		b.WriteString(wrapChatLine(prefix + msg.Text))
+		b.WriteString("\n\n")
+	}
+	if m.chatLoading {
+		b.WriteString("Agent: ... thinking ...\n")
+	}
+	m.textView.SetContent(b.String())
+	m.textView.GotoBottom()
 }
 
 // updateTickerViewContent updates the content of the tickerView viewport

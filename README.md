@@ -1,5 +1,15 @@
 
+# Build
 
+If you see errors like `missing go.sum entry for module providing package ...`, run:
+
+```bash
+go mod tidy
+```
+
+(or `go get github.com/cjh-cloud/obsyncian`). Then build with `go build ./...` or `go run .`.
+
+---
 
  aws s3 sync . s3://obsidian-sync-test-abcd/ --dryrun
  aws s3 sync s3://obsidian-sync-test-abcd/ . --dryrun --delete
@@ -29,4 +39,8 @@ handle dynamo/s3 requests better - 2025/06/29 18:54:54 Failed to scan DynamoDB t
 
 ## Terraform
 tf init
+
+### Bedrock AI chat
+1. **IAM**: The obsyncian IAM user needs `bedrock:Retrieve`, `bedrock:RetrieveAndGenerate`, and `bedrock:InvokeModel` (see `infra/main.tf`). Run `terraform apply` so the policy is applied.
+2. **Model access**: If you see "The model arn provided is not supported", enable the foundation model in the Bedrock console: **AWS Console → Bedrock → Model access** → enable **Amazon Nova Lite** (and choose the region that matches your config).
 
