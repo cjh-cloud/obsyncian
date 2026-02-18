@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -198,22 +197,62 @@ func (l *SQSListener) Start() {
 	go l.pollMessages()
 }
 
+// sendToUI sends a message to the TUI sync output pane
+func (l *SQSListener) sendToUI(text string) {
+	if l.program != nil {
+		l.program.Send(SyncProgressMsg{Text: text})
+	}
+}
+
+// Backoff parameters for SQS polling errors
+const (
+	initialBackoff = 1 * time.Second
+	maxBackoff     = 30 * time.Second
+	backoffFactor  = 2
+)
+
 // pollMessages continuously polls the SQS queue for messages
 func (l *SQSListener) pollMessages() {
 	defer l.wg.Done()
+
+	currentBackoff := time.Duration(0)
 
 	for {
 		select {
 		case <-l.stopChan:
 			return
 		default:
-			l.receiveAndProcessMessages()
+		}
+
+		// If we have a backoff delay (from a previous error), wait before polling
+		if currentBackoff > 0 {
+			select {
+			case <-l.stopChan:
+				return
+			case <-time.After(currentBackoff):
+			}
+		}
+
+		err := l.receiveAndProcessMessages()
+		if err != nil {
+			if currentBackoff == 0 {
+				currentBackoff = initialBackoff
+			} else {
+				currentBackoff *= backoffFactor
+				if currentBackoff > maxBackoff {
+					currentBackoff = maxBackoff
+				}
+			}
+			l.sendToUI(fmt.Sprintf("⚠️  SQS error (retrying in %v): %v", currentBackoff, err))
+		} else {
+			currentBackoff = 0
 		}
 	}
 }
 
-// receiveAndProcessMessages receives messages from SQS and processes them
-func (l *SQSListener) receiveAndProcessMessages() {
+// receiveAndProcessMessages receives messages from SQS and processes them.
+// Returns an error if the receive call failed (used by caller for backoff).
+func (l *SQSListener) receiveAndProcessMessages() error {
 	// Use the listener's cancellable context with a timeout for the request
 	ctx, cancel := context.WithTimeout(l.ctx, 25*time.Second)
 	defer cancel()
@@ -226,11 +265,9 @@ func (l *SQSListener) receiveAndProcessMessages() {
 	if err != nil {
 		// Check if we were cancelled (shutting down) - don't log this as an error
 		if l.ctx.Err() != nil {
-			return
+			return nil
 		}
-		// Log error but continue polling (could be transient)
-		log.Printf("SQS receive error: %v", err)
-		return
+		return err
 	}
 
 	shouldNotify := false
@@ -247,6 +284,8 @@ func (l *SQSListener) receiveAndProcessMessages() {
 	if shouldNotify {
 		l.triggerDebouncedNotification()
 	}
+
+	return nil
 }
 
 // triggerDebouncedNotification triggers a notification after the debounce period
@@ -277,14 +316,14 @@ func (l *SQSListener) shouldTriggerSync(msg types.Message) bool {
 	// Parse the SNS wrapper message
 	var snsMsg SNSMessage
 	if err := json.Unmarshal([]byte(*msg.Body), &snsMsg); err != nil {
-		log.Printf("Failed to parse SNS message: %v", err)
+		l.sendToUI(fmt.Sprintf("⚠️  Failed to parse SNS message: %v", err))
 		return true // Trigger sync on parse error to be safe
 	}
 
 	// Parse the actual S3 EventBridge event
 	var event S3EventBridgeEvent
 	if err := json.Unmarshal([]byte(snsMsg.Message), &event); err != nil {
-		log.Printf("Failed to parse S3 event: %v", err)
+		l.sendToUI(fmt.Sprintf("⚠️  Failed to parse S3 event: %v", err))
 		return true // Trigger sync on parse error to be safe
 	}
 
@@ -305,7 +344,7 @@ func (l *SQSListener) deleteMessage(receiptHandle *string) {
 		ReceiptHandle: receiptHandle,
 	})
 	if err != nil {
-		log.Printf("Failed to delete SQS message: %v", err)
+		l.sendToUI(fmt.Sprintf("⚠️  Failed to delete SQS message: %v", err))
 	}
 }
 
@@ -346,12 +385,9 @@ func (l *SQSListener) unsubscribeFromSNS() {
 		return
 	}
 
-	_, err := l.snsClient.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
+	l.snsClient.Unsubscribe(context.TODO(), &sns.UnsubscribeInput{
 		SubscriptionArn: aws.String(l.subscriptionARN),
 	})
-	if err != nil {
-		log.Printf("Failed to unsubscribe from SNS: %v", err)
-	}
 }
 
 // deleteQueue deletes the SQS queue
@@ -360,10 +396,7 @@ func (l *SQSListener) deleteQueue() {
 		return
 	}
 
-	_, err := l.sqsClient.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
+	l.sqsClient.DeleteQueue(context.TODO(), &sqs.DeleteQueueInput{
 		QueueUrl: aws.String(l.queueURL),
 	})
-	if err != nil {
-		log.Printf("Failed to delete SQS queue: %v", err)
-	}
 }
