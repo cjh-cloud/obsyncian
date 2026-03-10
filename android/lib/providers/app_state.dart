@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/obsyncian_config.dart';
@@ -9,7 +10,6 @@ import '../services/background_service.dart';
 import '../services/config_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/dynamodb_service.dart';
-import '../services/file_watcher_service.dart';
 import '../services/s3_sync_service.dart';
 import '../services/sqs_listener_service.dart';
 import '../services/sync_orchestrator.dart';
@@ -20,17 +20,19 @@ import '../services/sync_orchestrator.dart';
 ///   ConfigService -> loads config
 ///   SyncOrchestrator -> runs sync logic
 ///   ConnectivityService -> pauses/resumes on network changes
-///   FileWatcherService -> triggers sync on local file changes
 ///   SQSListenerService -> triggers sync on cloud changes
 ///   BackgroundSyncService -> keeps the process alive when backgrounded
-class AppState extends ChangeNotifier {
+///
+/// Implements [WidgetsBindingObserver] to sync on app lifecycle transitions:
+///   - resumed (foreground): pull cloud changes
+///   - paused (background): push local changes
+class AppState extends ChangeNotifier with WidgetsBindingObserver {
   // -- Services ---------------------------------------------------------------
   final ConfigService _configService = ConfigService();
   final S3SyncService _s3Service = S3SyncService();
   final DynamoDBService _dynamoDBService = DynamoDBService();
   final SQSListenerService _sqsListener = SQSListenerService();
   final ConnectivityService _connectivity = ConnectivityService();
-  final FileWatcherService _fileWatcher = FileWatcherService();
   late final SyncOrchestrator _orchestrator;
 
   // -- State ------------------------------------------------------------------
@@ -66,6 +68,8 @@ class AppState extends ChangeNotifier {
   /// Initialise: try to load a previously-saved config, start connectivity
   /// monitoring, and listen for background-service sync requests.
   Future<void> initialise() async {
+    WidgetsBinding.instance.addObserver(this);
+
     // Listen to sync log stream
     _subscriptions.add(
       _orchestrator.logStream.listen((msg) {
@@ -89,12 +93,10 @@ class AppState extends ChangeNotifier {
       }),
     );
 
-    // Listen for background service sync requests
+    // Listen for background service sync requests (sent on the 'sync' channel)
     _subscriptions.add(
-      BackgroundSyncService.logStream.listen((event) {
-        if (event != null && event.containsKey('action') && event['action'] == 'sync') {
-          triggerSync();
-        }
+      BackgroundSyncService.syncRequestStream.listen((_) {
+        triggerSync();
       }),
     );
 
@@ -107,6 +109,20 @@ class AppState extends ChangeNotifier {
       }
     } catch (e) {
       _addLog('Failed to load saved config: $e');
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _addLog('App resumed. Syncing...');
+        triggerSync();
+      case AppLifecycleState.paused:
+        _addLog('App paused. Syncing...');
+        triggerSync();
+      default:
+        break;
     }
   }
 
@@ -242,7 +258,7 @@ class AppState extends ChangeNotifier {
     }
 
     // Configure all services
-    _orchestrator.configure(config);
+    await _orchestrator.configure(config);
 
     // Set up SQS listener if SNS topic is configured
     if (config.hasSnsTopicArn) {
@@ -255,13 +271,6 @@ class AppState extends ChangeNotifier {
         _addLog('SQS listener failed to start: $e');
       }
     }
-
-    // Set up file watcher
-    _fileWatcher.onChange = () {
-      _addLog('Local file change detected.');
-      triggerSync();
-    };
-    _fileWatcher.start(config.local);
 
     // Start background service
     await BackgroundSyncService.start();
@@ -333,7 +342,6 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _stopServices() async {
-    _fileWatcher.stop();
     await _sqsListener.stop();
     await BackgroundSyncService.stop();
   }
@@ -350,11 +358,11 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final sub in _subscriptions) {
       sub.cancel();
     }
     _subscriptions.clear();
-    _fileWatcher.dispose();
     _connectivity.dispose();
     _orchestrator.dispose();
     super.dispose();

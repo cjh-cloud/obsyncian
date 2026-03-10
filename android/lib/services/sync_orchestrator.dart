@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/obsyncian_config.dart';
 import 'dynamodb_service.dart';
 import 's3_sync_service.dart';
@@ -13,10 +15,16 @@ enum SyncState { idle, syncing, error, offline }
 ///   1. Get latest cloud sync from DynamoDB
 ///   2. If table empty -> sync up, create user
 ///   3. If user doesn't exist -> create user, sync down
-///   4. If another user synced more recently -> sync down, then check local
-///   5. Dry-run local vs S3 -> sync up if changes
+///   4. If another user synced more recently -> sync down
+///   5. Only if we did NOT sync down: dry-run local vs S3 -> sync up if changes
 ///   6. Update DynamoDB timestamp after sync up
+///
+/// The dry-run is skipped after a sync-down to prevent a race condition where
+/// S3 changes between the sync-down and dry-run would be misinterpreted as
+/// local changes, causing the mobile to overwrite newer cloud content.
 class SyncOrchestrator {
+  static const _lastSyncedTsKey = 'obsyncian_last_synced_timestamp';
+
   final S3SyncService _s3Service;
   final DynamoDBService _dynamoDBService;
 
@@ -43,11 +51,12 @@ class SyncOrchestrator {
   })  : _s3Service = s3Service,
         _dynamoDBService = dynamoDBService;
 
-  void configure(ObsyncianConfig config) {
+  Future<void> configure(ObsyncianConfig config) async {
     _config = config;
     _s3Service.configure(config);
     _s3Service.onProgress = _log;
     _dynamoDBService.configure(config);
+    await _loadLastSyncedTimestamp();
   }
 
   /// Run a full sync cycle. If a sync is already in progress, queues another
@@ -77,6 +86,12 @@ class SyncOrchestrator {
   }
 
   /// The core sync algorithm, matching `handleSyncAsync` from the Go app.
+  ///
+  /// After syncing down, the dry-run check is skipped for this cycle to prevent
+  /// a race condition: if S3 changes between our sync-down and the dry-run,
+  /// the diff would be misinterpreted as local changes. The next sync trigger
+  /// (SQS notification, manual button, or lifecycle event) will handle any
+  /// genuine local changes.
   Future<void> _handleSync() async {
     _log('Last local sync: ${DateTime.now()}');
     _log('Config: region=${_config.awsRegion}, bucket=${_config.cloud}, '
@@ -98,6 +113,8 @@ class SyncOrchestrator {
 
     _log('Latest cloud sync: ${latestSync.timestamp} by ${latestSync.userId}');
 
+    bool didSyncDown = false;
+
     // 2. Check if our user exists
     final ourItem = await _dynamoDBService.getUser(_config.id);
 
@@ -106,9 +123,9 @@ class SyncOrchestrator {
       await _dynamoDBService.createUser(_config.id);
       _log('Syncing down from S3...');
       await _s3Service.syncDown();
-      _lastSyncedTimestamp = latestSync.timestamp;
+      await _saveLastSyncedTimestamp(latestSync.timestamp);
       _log('Finished syncing down (new user).');
-      // Fall through to check local changes
+      didSyncDown = true;
     } else {
       // 3. Check if we need to sync down
       final needsSyncDown = _config.id != latestSync.userId &&
@@ -118,14 +135,23 @@ class SyncOrchestrator {
       if (needsSyncDown) {
         _log('Not synced with Cloud. Syncing down from S3...');
         await _s3Service.syncDown();
-        _lastSyncedTimestamp = latestSync.timestamp;
+        await _saveLastSyncedTimestamp(latestSync.timestamp);
         _log('Finished syncing down.');
+        didSyncDown = true;
       } else {
         _log('Already synced with Cloud.');
       }
     }
 
-    // 4. Check for local changes via dry-run
+    // 4. Skip the dry-run if we just synced down — local files now match the
+    //    cloud snapshot we pulled. Any diff at this point would be a race
+    //    (another device syncing up during our sync-down) not a real local edit.
+    if (didSyncDown) {
+      _log('Skipping local change check after sync-down (race prevention).');
+      return;
+    }
+
+    // 5. Check for local changes via dry-run
     _log('Checking for local changes (dry-run S3 diff)...');
     final diff = await _s3Service.dryRunSyncUp();
 
@@ -146,6 +172,17 @@ class SyncOrchestrator {
 
   void _log(String message) {
     _logController.add(message);
+  }
+
+  Future<void> _loadLastSyncedTimestamp() async {
+    final prefs = await SharedPreferences.getInstance();
+    _lastSyncedTimestamp = prefs.getString(_lastSyncedTsKey) ?? '';
+  }
+
+  Future<void> _saveLastSyncedTimestamp(String ts) async {
+    _lastSyncedTimestamp = ts;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_lastSyncedTsKey, ts);
   }
 
   void dispose() {

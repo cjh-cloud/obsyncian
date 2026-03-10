@@ -53,10 +53,10 @@ class BackgroundSyncService {
     service.invoke('sync');
   }
 
-  /// Listen for log messages coming from the background isolate.
-  static Stream<Map<String, dynamic>?> get logStream {
+  /// Listen for sync requests sent by the background isolate.
+  static Stream<Map<String, dynamic>?> get syncRequestStream {
     final service = FlutterBackgroundService();
-    return service.on('log');
+    return service.on('sync');
   }
 
   /// The entry point for the background isolate.
