@@ -620,7 +620,7 @@ func main() {
 		}
 	})
 	if err != nil {
-		log.Printf("Warning: Could not start file watcher: %v", err)
+		model.outputBuffer.WriteString(fmt.Sprintf("⚠️  Could not start file watcher: %v\n", err))
 	} else {
 		model.fileWatcher = watcher
 		watcher.Start()
@@ -635,12 +635,12 @@ func main() {
 			p,
 		)
 		if err != nil {
-			log.Printf("Warning: Could not start SQS listener: %v. Falling back to polling.", err)
+			model.outputBuffer.WriteString(fmt.Sprintf("⚠️  Could not start SQS listener: %v. Falling back to polling.\n", err))
 			model.useEventDriven = false
 		} else {
 			model.sqsListener = sqsListener
 			sqsListener.Start()
-			log.Printf("Event-driven sync enabled via SQS")
+			model.outputBuffer.WriteString("Event-driven sync enabled via SQS\n")
 		}
 	}
 

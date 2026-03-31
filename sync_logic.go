@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"sort"
@@ -209,17 +208,20 @@ func (c *ObsyncianConfig) AWSRegion() string {
 	return "ap-southeast-2"
 }
 
-func create_user(userId string, tableName string, svc *dynamodb.Client) {
+func create_user(userId string, tableName string, svc *dynamodb.Client) error {
 	userEntry := Item{UserId: userId, Timestamp: time.Now().Format("20060102150405")}
 	item, err := attributevalue.MarshalMap(userEntry)
-	fmt.Println(item)
+	if err != nil {
+		return fmt.Errorf("couldn't marshal user entry: %w", err)
+	}
 	putInput := &dynamodb.PutItemInput{
 		TableName: aws.String(tableName), Item: item,
 	}
 	_, err = svc.PutItem(context.TODO(), putInput)
 	if err != nil {
-		log.Printf("Couldn't add item to table. Here's why: %v", err)
+		return fmt.Errorf("couldn't add item to table: %w", err)
 	}
+	return nil
 }
 
 // Scan DynamoDB table for latest timestamp
@@ -250,18 +252,18 @@ func get_latest_sync(tableName string, svc *dynamodb.Client) (string, string, er
 				if errors.As(reqErr.Unwrap(), &netErr) {
 					return "", "", fmt.Errorf("network error: %w", err)
 				}
-			} else if errors.Is(err, context.DeadlineExceeded) {
-				return "", "", fmt.Errorf("context error: %w", err)
-			} else {
-				log.Fatalf("Failed to scan DynamoDB table: %v", err)
 			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return "", "", fmt.Errorf("context error: %w", err)
+			}
+			return "", "", fmt.Errorf("failed to scan DynamoDB table: %w", err)
 		}
 		totalConsumedCapacity += *result.ConsumedCapacity.CapacityUnits
 
 		var pageItems []Item
 		err = attributevalue.UnmarshalListOfMaps(result.Items, &pageItems)
 		if err != nil {
-			log.Fatalf("Failed to unmarshal scanned items: %v", err)
+			return "", "", fmt.Errorf("failed to unmarshal scanned items: %w", err)
 		}
 		allItems = append(allItems, pageItems...)
 
@@ -318,7 +320,11 @@ func handleSyncAsync(m *mainModel, p *tea.Program, lastSyncedTs string) {
 
 	if result.Item == nil {
 		p.Send(SyncProgressMsg{Text: fmt.Sprintf("No item found with UUID: %s in table: %s", m.config.ID, tableName)})
-		create_user(m.config.ID, tableName, m.svc)
+		if err := create_user(m.config.ID, tableName, m.svc); err != nil {
+			p.Send(SyncProgressMsg{Text: fmt.Sprintf("❗ Failed to create user: %v", err)})
+			p.Send(SyncCompleteMsg{Success: false, Error: err})
+			return
+		}
 		p.Send(SyncProgressMsg{Text: "Syncing down..."})
 		runAsyncSyncDown(m, p, latest_sync, false)
 		return
@@ -412,7 +418,11 @@ func runAsyncSyncUp(m *mainModel, p *tea.Program, isNewUser bool) {
 						} else {
 							p.Send(SyncProgressMsg{Text: "✅ Finished syncing up."})
 							if isNewUser {
-								create_user(m.config.ID, tableName, m.svc)
+								if err := create_user(m.config.ID, tableName, m.svc); err != nil {
+									p.Send(SyncProgressMsg{Text: fmt.Sprintf("❗ Failed to create user: %v", err)})
+									p.Send(SyncCompleteMsg{Success: false, Error: err})
+									return
+								}
 							}
 							updateTimestamp(m, p)
 							p.Send(SyncCompleteMsg{Success: true})
@@ -511,7 +521,9 @@ func handleSync(m *mainModel) {
 		m.appendOutput("Table is empty. Syncing up...")
 		Sync(m.config.Local, fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Credentials)
 		m.appendOutput("Finished syncing.")
-		create_user(m.config.ID, tableName, m.svc)
+		if err := create_user(m.config.ID, tableName, m.svc); err != nil {
+			m.appendOutput(fmt.Sprintf("❗ Failed to create user: %v", err))
+		}
 		return
 	}
 
@@ -528,7 +540,10 @@ func handleSync(m *mainModel) {
 
 	if result.Item == nil {
 		m.appendOutput(fmt.Sprintf("No item found with UUID: %s in table: %s", m.config.ID, tableName))
-		create_user(m.config.ID, tableName, m.svc)
+		if err := create_user(m.config.ID, tableName, m.svc); err != nil {
+			m.appendOutput(fmt.Sprintf("❗ Failed to create user: %v", err))
+			return
+		}
 		m.appendOutput("Syncing down...")
 		Sync(fmt.Sprintf("s3://%s", m.config.Cloud), m.config.Local, m.config.Credentials)
 		m.appendOutput("Finished syncing.")
