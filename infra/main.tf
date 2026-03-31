@@ -164,6 +164,25 @@ data "aws_iam_policy_document" "obsyncian" {
     resources = ["arn:aws:sns:*:${data.aws_caller_identity.current.account_id}:obsyncian-sync-notifications"]
   }
 
+  # Bedrock knowledge base: query for chat (RetrieveAndGenerate)
+  # Requires: bedrock:InvokeModel to run the foundation model used for generation
+  statement {
+    effect = "Allow"
+    actions = [
+      "bedrock:Retrieve",
+      "bedrock:RetrieveAndGenerate",
+      "bedrock:InvokeModel"
+    ]
+    resources = ["*"]
+  }
+
+  # Bedrock knowledge base: trigger ingestion (Sync KB)
+  statement {
+    effect    = "Allow"
+    actions   = ["bedrock:StartIngestionJob", "bedrock:GetIngestionJob"]
+    resources = ["*"]
+  }
+
   #   statement {
   #     effect    = "Allow"
   #     actions   = ["KMS:*"]
