@@ -1,0 +1,67 @@
+name: obsyncian
+description: "Obsyncian - Obsidian vault sync for Android via AWS S3"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # AWS SDK packages (auto-generated API clients)
+  aws_s3_api: any
+  aws_dynamodb_api: any
+  aws_sqs_api: any
+  aws_sns_api: any
+  shared_aws_api: any
+
+  # Official AWS SigV4 signing (replaces shared_aws_api's built-in signer)
+  aws_signature_v4: any
+  aws_common: any
+
+  # File picker
+  file_picker: any
+
+  # Connectivity monitoring
+  connectivity_plus: any
+
+  # Background service
+  flutter_background_service: any
+  flutter_local_notifications: any
+
+  # File watching
+  watcher: any
+
+  # State management
+  provider: any
+
+  # Persistent storage
+  shared_preferences: any
+
+  # Permissions
+  permission_handler: any
+
+  # HTTP client
+  http: any
+
+  # Crypto for MD5/ETag
+  crypto: any
+
+  # Path utilities
+  path: any
+
+  # UUID generation
+  uuid: any
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

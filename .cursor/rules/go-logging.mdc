@@ -1,0 +1,31 @@
+---
+description: Go logging convention - route all logs through the TUI sync pane, never use log.Printf during TUI
+globs: "**/*.go"
+alwaysApply: false
+---
+
+# Logging Convention
+
+This project uses a Bubble Tea TUI with an alt-screen. Writing to stdout/stderr (via `log.Printf`, `fmt.Println`, etc.) while the TUI is active corrupts the display.
+
+## Rules
+
+- **During TUI lifetime**: Never use `log.Printf`, `log.Println`, or `fmt.Print*`. Instead, route all messages through the TUI sync output pane:
+  - From code with a `*tea.Program` reference: use `p.Send(SyncProgressMsg{Text: "..."})`
+  - From code with model access: use `m.appendOutput("...")`
+  - From `SQSListener` methods: use `l.sendToUI("...")`
+  - From code before `p.Run()`: write directly to `model.outputBuffer`
+- **Before TUI starts** (e.g. `log.Fatalf` for config loading failures): `log.Fatal*` is acceptable since the TUI hasn't entered alt-screen yet.
+- **After TUI exits** (after `p.Run()` returns): `log.Print*` / `fmt.Print*` is acceptable for informational post-exit messages.
+- **Shutdown cleanup** (e.g. SQS unsubscribe, queue deletion): These run while alt-screen is still active. Silently ignore errors or store them for post-exit display -- do not log.
+- **Errors in background goroutines**: Return errors to callers where possible, and let callers route them to the TUI. Use exponential backoff to avoid spamming the output pane.
+
+## Example
+
+```go
+// BAD - corrupts TUI display
+log.Printf("SQS error: %v", err)
+
+// GOOD - appears in the sync output pane
+p.Send(SyncProgressMsg{Text: fmt.Sprintf("⚠️  SQS error: %v", err)})
+```
