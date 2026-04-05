@@ -15,16 +15,33 @@ import (
 
 // defaultModelARN returns the Amazon Nova Lite model ARN for the given region.
 // Nova is supported for Knowledge Base RetrieveAndGenerate.
-// If you get "The model arn provided is not supported": enable the model in the
-// Bedrock console (AWS Console → Bedrock → Model access → Enable "Amazon Nova Lite").
 func defaultModelARN(region string) string {
-	return "arn:aws:bedrock:" + region + "::foundation-model/amazon.nova-lite-v1:0"
+	return "arn:aws:bedrock:" + region + "::foundation-model/qwen.qwen3-vl-235b-a22b" // amazon.nova-lite-v1:0"
 }
 
 // BedrockClient wraps the Bedrock Agent Runtime client for knowledge base queries.
 type BedrockClient struct {
 	client *bedrockagentruntime.Client
 }
+
+// Define your templates (using Bedrock's $placeholder$ syntax)
+const (
+	// Orchestration: How the model should process the input before retrieval
+	orchestrationTemplate = `
+    You are an AI assistant. Review the following conversation history:
+    $conversation_history$
+
+    Given the user's request: $query$, search the knowledge base of notes to find relevant information.
+
+    Please follow these instructions for formatting your output:
+    $output_format_instructions$`
+
+	// Generation: How the model should answer using the results
+	generationTemplate = `You are a helpful assistant. Use the knowledge base of the user's notes to answer the question.
+Context: $search_results$
+User Question: $query$
+Answer:`
+)
 
 // NewBedrockClient creates a Bedrock client using the given config.
 func NewBedrockClient(cfg ObsyncianConfig) (*BedrockClient, error) {
@@ -46,13 +63,26 @@ func (b *BedrockClient) RetrieveAndGenerate(ctx context.Context, knowledgeBaseID
 	modelARN := defaultModelARN(region)
 	input := &bedrockagentruntime.RetrieveAndGenerateInput{
 		Input: &types.RetrieveAndGenerateInput{
-			Text: aws.String(query),
+			Text: aws.String(query), // The user query goes here
 		},
 		RetrieveAndGenerateConfiguration: &types.RetrieveAndGenerateConfiguration{
 			Type: types.RetrieveAndGenerateTypeKnowledgeBase,
 			KnowledgeBaseConfiguration: &types.KnowledgeBaseRetrieveAndGenerateConfiguration{
 				KnowledgeBaseId: aws.String(knowledgeBaseID),
 				ModelArn:        aws.String(modelARN),
+				// 1. GENERATION CONFIG
+				GenerationConfiguration: &types.GenerationConfiguration{
+					PromptTemplate: &types.PromptTemplate{
+						TextPromptTemplate: aws.String(generationTemplate),
+					},
+				},
+				
+				// 2. ORCHESTRATION CONFIG (The part missing that's causing your error)
+				OrchestrationConfiguration: &types.OrchestrationConfiguration{
+					PromptTemplate: &types.PromptTemplate{
+						TextPromptTemplate: aws.String(orchestrationTemplate),
+					},
+				},
 			},
 		},
 	}
