@@ -1,0 +1,33 @@
+buildscript {
+    ext {
+        buildToolsVersion = "36.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 36
+        targetSdkVersion = 36
+        ndkVersion = "27.1.12297006"
+        kotlinVersion = "2.1.20"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+// @react-native-async-storage/async-storage v3 bundles org.asyncstorage.shared_storage:storage-android
+// in node_modules (not published to Maven Central). See https://github.com/react-native-async-storage/async-storage/issues/1280
+allprojects {
+    repositories {
+        maven {
+            url("${rootDir}/../node_modules/@react-native-async-storage/async-storage/android/local_repo")
+        }
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
