@@ -8,8 +8,9 @@ import {
 } from './src/store/appStore';
 import { connectivityService } from './src/services/connectivityService';
 import { syncOrchestrator } from './src/services/syncOrchestrator';
-import { sqsListenerService } from './src/services/sqsListenerService';
 import { backgroundSyncService } from './src/services/backgroundService';
+// Note: sqsListenerService is NOT imported here — the background service
+// owns SQS setup + polling so it runs under the foreground service wakelock.
 
 let isInitialized = false;
 
@@ -32,11 +33,8 @@ function App() {
         if (state.config && state.vaultPath) {
           await syncOrchestrator.init(state.config, state.vaultPath, state.isOnline);
 
-          if (state.config.snsTopicArn) {
-            await sqsListenerService.start(state.config, state.addLog);
-          }
-
-          await backgroundSyncService.start(state.addLog);
+          // Background service now owns both periodic sync AND SQS polling
+          await backgroundSyncService.start(state.config, state.addLog);
         }
       } catch (error) {
         console.error('App initialization error:', error);
@@ -70,16 +68,13 @@ function App() {
 
     const reInit = async () => {
       try {
-        await sqsListenerService.stop();
+        // stop() tears down both the SQS listener and the foreground service
         await backgroundSyncService.stop();
 
         await syncOrchestrator.init(config, vaultPath, useAppStore.getState().isOnline);
 
-        if (config.snsTopicArn) {
-          await sqsListenerService.start(config, useAppStore.getState().addLog);
-        }
-
-        await backgroundSyncService.start(useAppStore.getState().addLog);
+        // Restart — background service sets up SQS internally
+        await backgroundSyncService.start(config, useAppStore.getState().addLog);
       } catch (error) {
         console.error('App re-initialization error:', error);
         useAppStore.getState().addLog(`[App] Re-initialization error: ${error}`);

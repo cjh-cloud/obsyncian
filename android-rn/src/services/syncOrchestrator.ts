@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ObsyncianConfig } from '../models/config';
-import { s3SyncService } from './s3SyncService';
+import { s3SyncService, SyncProgress } from './s3SyncService';
 import { dynamoDBService } from './dynamoDBService';
 import { fileStatCache } from './fileStatCache';
 import { ensureAndroidVaultStorageAccess } from './androidStoragePermission';
@@ -11,6 +11,7 @@ export type SyncState = 'idle' | 'syncing' | 'error' | 'offline';
 
 type OnStateChangeCallback = (state: SyncState) => void;
 type OnLogCallback = (msg: string) => void;
+type OnSyncProgressCallback = (progress: SyncProgress) => void;
 
 class SyncOrchestrator {
   private isSyncing = false;
@@ -18,6 +19,7 @@ class SyncOrchestrator {
   private lastSyncedTimestamp: string = '';
   private onStateChange: OnStateChangeCallback | null = null;
   private onLog: OnLogCallback | null = null;
+  private onSyncProgress: OnSyncProgressCallback | null = null;
   private isOnline = true;
   private vaultPath: string = '';
 
@@ -47,6 +49,12 @@ class SyncOrchestrator {
     this.onLog = callback;
   }
 
+  setOnSyncProgress(callback: OnSyncProgressCallback): void {
+    this.onSyncProgress = callback;
+    // Forward to S3 sync service so it can emit progress during upload/download
+    s3SyncService.setOnProgress(callback);
+  }
+
   setIsOnline(isOnline: boolean): void {
     this.isOnline = isOnline;
   }
@@ -61,6 +69,10 @@ class SyncOrchestrator {
     this.isSyncing = true;
     this.changeState('syncing');
 
+    // NOTE: no keepalive timer here — the background service's unified
+    // 2 s runBackgroundTimer tick acts as the keepalive, waking the JS
+    // thread so pending HTTP-response events are processed between awaits.
+
     try {
       await this.handleSync(deviceId);
 
@@ -68,6 +80,7 @@ class SyncOrchestrator {
         this.log('[Sync] Queued sync triggered');
         this.isSyncQueued = false;
         await this.sync(deviceId);
+        return;
       }
 
       this.changeState('idle');
@@ -99,6 +112,7 @@ class SyncOrchestrator {
       await s3SyncService.syncUp();
       await dynamoDBService.createUser(deviceId);
       await dynamoDBService.updateTimestamp(deviceId);
+      await fileStatCache.save();
       return;
     }
 
@@ -109,8 +123,8 @@ class SyncOrchestrator {
       this.log('[Sync] User not found in table, creating and syncing down');
       await dynamoDBService.createUser(deviceId);
       await s3SyncService.syncDown();
-      // Remember the DynamoDB cloud revision we pulled (same as Flutter).
       await this.saveLastPulledCloudRevision(latestSync.timestamp);
+      await fileStatCache.save();
       return;
     }
 
@@ -126,16 +140,17 @@ class SyncOrchestrator {
       );
       await s3SyncService.syncDown();
       await this.saveLastPulledCloudRevision(latestSync.timestamp);
+      await fileStatCache.save();
       return;
     }
 
     // 5. Dry run to check for local changes
     this.log('[Sync] Checking for local changes');
-    const diff = await s3SyncService.dryRun();
+    const dryRunResult = await s3SyncService.dryRun();
 
-    if (diff.toUpload.length > 0 || diff.toDelete.length > 0) {
+    if (dryRunResult.diff.toUpload.length > 0 || dryRunResult.diff.toDelete.length > 0) {
       this.log('[Sync] Local changes detected, syncing up');
-      await s3SyncService.syncUp();
+      await s3SyncService.syncUp(dryRunResult);
       await dynamoDBService.updateTimestamp(deviceId);
     } else {
       this.log('[Sync] No local changes detected');

@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 13+ (API 33): required for foreground-service notification to be visible -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Allows the app to ask the user to exempt it from Doze / battery optimization
+         so that SQS long-polling continues when the screen is off. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Legacy storage (API ≤32); helps some primary-storage paths -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission

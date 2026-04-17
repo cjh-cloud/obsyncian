@@ -153,14 +153,16 @@ class DynamoDBService {
   }
 
   private nowTimestamp(): string {
-    // Return UTC timestamp in YYYYMMDDHHmmss format
+    // Local time, not UTC — matches the Go app's time.Now().Format("20060102150405")
+    // and the Flutter app's DateTime.now(). All devices must use the same convention
+    // so that lexicographic timestamp comparison in the orchestrator works correctly.
     const now = new Date();
-    const year = now.getUTCFullYear();
-    const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(now.getUTCDate()).padStart(2, '0');
-    const hour = String(now.getUTCHours()).padStart(2, '0');
-    const minute = String(now.getUTCMinutes()).padStart(2, '0');
-    const second = String(now.getUTCSeconds()).padStart(2, '0');
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const hour = String(now.getHours()).padStart(2, '0');
+    const minute = String(now.getMinutes()).padStart(2, '0');
+    const second = String(now.getSeconds()).padStart(2, '0');
 
     return `${year}${month}${day}${hour}${minute}${second}`;
   }

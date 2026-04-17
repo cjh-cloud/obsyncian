@@ -28,6 +28,12 @@ export interface SyncDiff {
   toDelete: FileInfo[];
 }
 
+export interface DryRunResult {
+  diff: SyncDiff;
+  localFiles: FileInfo[];
+  remoteFiles: FileInfo[];
+}
+
 /** Match Flutter: only skip the `.git` directory segment, not arbitrary `.git` substrings. */
 function shouldSkipRelativePath(relativePath: string): boolean {
   return relativePath.split('/').some((segment) => segment === '.git');
@@ -99,11 +105,22 @@ function localMatchesRemote(local: FileInfo, remote: FileInfo): boolean {
   return ltag === rtag;
 }
 
+export type SyncProgressCallback = (progress: SyncProgress) => void;
+
+export interface SyncProgress {
+  phase: 'listing' | 'uploading' | 'downloading' | 'deleting' | 'done';
+  current: number;
+  total: number;
+  /** The file currently being processed (if applicable). */
+  file?: string;
+}
+
 class S3SyncService {
   private s3Client: S3Client | null = null;
   private bucketName: string = '';
   private vaultPath: string = '';
   private lastLog: (msg: string) => void = () => {};
+  private onProgress: SyncProgressCallback | null = null;
 
   async init(config: ObsyncianConfig, vaultPath: string, onLog: (msg: string) => void): Promise<void> {
     this.bucketName = config.cloud;
@@ -120,16 +137,44 @@ class S3SyncService {
     });
   }
 
-  async syncUp(): Promise<void> {
+  setOnProgress(callback: SyncProgressCallback | null): void {
+    this.onProgress = callback;
+  }
+
+  private emitProgress(progress: SyncProgress): void {
+    if (this.onProgress) {
+      try {
+        this.onProgress(progress);
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
+
+  async syncUp(precomputed?: DryRunResult): Promise<void> {
     if (!this.s3Client) throw new Error('S3SyncService not initialized');
 
     this.lastLog('[S3] Starting sync up (local → S3)');
-    const diff = await this.dryRun();
 
-    // Upload new/changed files
-    for (const file of diff.toUpload) {
+    let toUpload: FileInfo[];
+    let toDeleteRemote: FileInfo[];
+
+    if (precomputed) {
+      toUpload = precomputed.diff.toUpload;
+      toDeleteRemote = precomputed.diff.toDelete;
+    } else {
+      const result = await this.dryRun();
+      toUpload = result.diff.toUpload;
+      toDeleteRemote = result.diff.toDelete;
+    }
+
+    const totalOps = toUpload.length + toDeleteRemote.length;
+    let completed = 0;
+
+    for (const file of toUpload) {
       const fullPath = `${this.vaultPath}/${file.path}`;
       this.lastLog(`[S3] Uploading: ${file.path}`);
+      this.emitProgress({ phase: 'uploading', current: completed + 1, total: totalOps, file: file.path });
 
       try {
         const fileContent = await RNFS.readFile(fullPath, 'base64');
@@ -143,15 +188,16 @@ class S3SyncService {
         });
 
         await uploader.done();
+        completed++;
       } catch (error) {
         this.lastLog(`[S3] Upload failed: ${file.path}: ${error}`);
         throw error;
       }
     }
 
-    // Delete files not in local
-    for (const file of diff.toDelete) {
+    for (const file of toDeleteRemote) {
       this.lastLog(`[S3] Deleting from S3: ${file.path}`);
+      this.emitProgress({ phase: 'deleting', current: completed + 1, total: totalOps, file: file.path });
 
       try {
         await this.s3Client.send(
@@ -160,12 +206,14 @@ class S3SyncService {
             Key: file.path,
           }),
         );
+        completed++;
       } catch (error) {
         this.lastLog(`[S3] Delete failed: ${file.path}: ${error}`);
         throw error;
       }
     }
 
+    this.emitProgress({ phase: 'done', current: totalOps, total: totalOps });
     this.lastLog('[S3] Sync up complete');
   }
 
@@ -173,99 +221,114 @@ class S3SyncService {
     if (!this.s3Client) throw new Error('S3SyncService not initialized');
 
     this.lastLog('[S3] Starting sync down (S3 → local)');
+    this.emitProgress({ phase: 'listing', current: 0, total: 0 });
 
     const remoteFiles = await this.listS3Objects();
     const localFiles = await this.listLocalFiles();
 
-    // Download new/changed files
-    for (const remote of remoteFiles) {
+    // Build lists of work
+    const toDownload = remoteFiles.filter((remote) => {
       const local = localFiles.find((f) => f.path === remote.path);
+      return !local || !localMatchesRemote(local, remote);
+    });
+    const toDeleteLocal = localFiles.filter(
+      (local) => !remoteFiles.find((r) => r.path === local.path),
+    );
 
-      if (!local || !localMatchesRemote(local, remote)) {
-        this.lastLog(`[S3] Downloading: ${remote.path}`);
+    const totalOps = toDownload.length + toDeleteLocal.length;
+    let completed = 0;
 
-        try {
-          const fullPath = `${this.vaultPath}/${remote.path}`;
+    // Download new/changed files
+    for (const remote of toDownload) {
+      this.lastLog(`[S3] Downloading: ${remote.path}`);
+      this.emitProgress({ phase: 'downloading', current: completed + 1, total: totalOps, file: remote.path });
 
-          // Create directories
-          const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
-          await RNFS.mkdir(dir);
+      try {
+        const fullPath = `${this.vaultPath}/${remote.path}`;
 
-          // Download file
-          const response = await this.s3Client.send(
-            new GetObjectCommand({
-              Bucket: this.bucketName,
-              Key: remote.path,
-            }),
-          );
+        // Create directories
+        const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+        await RNFS.mkdir(dir);
 
-          const b64 = await this.responseBodyToBase64(response.Body);
-          await RNFS.writeFile(fullPath, b64, 'base64');
+        // Download file
+        const response = await this.s3Client.send(
+          new GetObjectCommand({
+            Bucket: this.bucketName,
+            Key: remote.path,
+          }),
+        );
 
-          // Update stat cache
-          const stat = await RNFS.stat(fullPath);
-          fileStatCache.set(remote.path, {
-            mtime: statMtimeMs(stat),
-            size: Number(stat.size) || 0,
-            md5: remote.etag,
-          });
-        } catch (error) {
-          this.lastLog(`[S3] Download failed: ${remote.path}: ${error}`);
-          throw error;
-        }
+        const b64 = await this.responseBodyToBase64(response.Body);
+        await RNFS.writeFile(fullPath, b64, 'base64');
+
+        // Update stat cache
+        const stat = await RNFS.stat(fullPath);
+        fileStatCache.set(remote.path, {
+          mtime: statMtimeMs(stat),
+          size: Number(stat.size) || 0,
+          md5: remote.etag,
+        });
+        completed++;
+      } catch (error) {
+        this.lastLog(`[S3] Download failed: ${remote.path}: ${error}`);
+        throw error;
       }
     }
 
     // Delete local files not in S3
-    for (const local of localFiles) {
-      if (!remoteFiles.find((r) => r.path === local.path)) {
-        const fullPath = `${this.vaultPath}/${local.path}`;
-        this.lastLog(`[S3] Deleting local file: ${local.path}`);
+    for (const local of toDeleteLocal) {
+      const fullPath = `${this.vaultPath}/${local.path}`;
+      this.lastLog(`[S3] Deleting local file: ${local.path}`);
+      this.emitProgress({ phase: 'deleting', current: completed + 1, total: totalOps, file: local.path });
 
-        try {
-          await RNFS.unlink(fullPath);
-          fileStatCache.set(local.path, undefined as any); // Remove from cache
-        } catch (error) {
-          this.lastLog(`[S3] Delete local failed: ${local.path}: ${error}`);
-          throw error;
-        }
+      try {
+        await RNFS.unlink(fullPath);
+        fileStatCache.set(local.path, undefined as any); // Remove from cache
+        completed++;
+      } catch (error) {
+        this.lastLog(`[S3] Delete local failed: ${local.path}: ${error}`);
+        throw error;
       }
     }
 
+    this.emitProgress({ phase: 'done', current: totalOps, total: totalOps });
     this.lastLog('[S3] Sync down complete');
   }
 
-  async dryRun(): Promise<SyncDiff> {
+  /**
+   * Dry-run sync-up diff (matches Flutter's dryRunSyncUp).
+   * Returns the diff plus the raw file lists so syncUp() can reuse them
+   * without a second listing pass.
+   */
+  async dryRun(): Promise<DryRunResult> {
+    this.emitProgress({ phase: 'listing', current: 0, total: 0 });
     const remoteFiles = await this.listS3Objects();
     const localFiles = await this.listLocalFiles();
 
+    const localMap = new Map(localFiles.map((f) => [f.path, f]));
+    const remoteMap = new Map(remoteFiles.map((f) => [f.path, f]));
+
     const toUpload: FileInfo[] = [];
-    const toDownload: FileInfo[] = [];
     const toDelete: FileInfo[] = [];
 
-    // Files to upload or download
     for (const local of localFiles) {
-      const remote = remoteFiles.find((r) => r.path === local.path);
+      const remote = remoteMap.get(local.path);
       if (!remote || !localMatchesRemote(local, remote)) {
         toUpload.push(local);
       }
     }
 
     for (const remote of remoteFiles) {
-      const local = localFiles.find((l) => l.path === remote.path);
-      if (!local || !localMatchesRemote(local, remote)) {
-        toDownload.push(remote);
+      if (!localMap.has(remote.path)) {
+        toDelete.push(remote);
       }
     }
 
-    // Files to delete on S3
-    for (const local of localFiles) {
-      if (!remoteFiles.find((r) => r.path === local.path)) {
-        toDelete.push(local);
-      }
-    }
-
-    return { toUpload, toDownload, toDelete };
+    return {
+      diff: { toUpload, toDownload: [], toDelete },
+      localFiles,
+      remoteFiles,
+    };
   }
 
   private async listLocalFiles(): Promise<FileInfo[]> {
@@ -289,15 +352,14 @@ class S3SyncService {
             const mtimeMs = statMtimeMs(stat);
             const size = Number(stat.size) || 0;
 
-            // Always hash from raw bytes (same as Flutter readAsBytes + md5). Stat-only caching
-            // misses edits when Android mtime is second-resolution and size is unchanged.
-            const md5Hex = await this.md5HexOfFileFromDisk(item.path);
-
-            fileStatCache.set(relativePath, {
-              mtime: mtimeMs,
-              size,
-              md5: md5Hex,
-            });
+            let md5Hex: string;
+            const cached = fileStatCache.get(relativePath);
+            if (cached?.md5 && cached.mtime === mtimeMs && cached.size === size) {
+              md5Hex = cached.md5;
+            } else {
+              md5Hex = await this.md5HexOfFileFromDisk(item.path);
+              fileStatCache.set(relativePath, { mtime: mtimeMs, size, md5: md5Hex });
+            }
 
             files.push({
               path: relativePath,

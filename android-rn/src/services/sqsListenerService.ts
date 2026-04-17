@@ -1,17 +1,17 @@
 import {
   SQSClient,
   CreateQueueCommand,
+  GetQueueUrlCommand,
   GetQueueAttributesCommand,
   SetQueueAttributesCommand,
   ReceiveMessageCommand,
   DeleteMessageCommand,
-  DeleteQueueCommand,
 } from '@aws-sdk/client-sqs';
 import {
   SNSClient,
   SubscribeCommand,
-  UnsubscribeCommand,
 } from '@aws-sdk/client-sns';
+import BackgroundTimer from 'react-native-background-timer';
 import { ObsyncianConfig } from '../models/config';
 
 type OnCloudChangeCallback = () => void;
@@ -19,20 +19,22 @@ type OnCloudChangeCallback = () => void;
 class SQSListenerService {
   private sqsClient: SQSClient | null = null;
   private snsClient: SNSClient | null = null;
-  private running = false;
   private queueUrl: string = '';
   private subscriptionArn: string = '';
   private deviceId: string = '';
   private snsTopicArn: string = '';
-  private debounceTimer: NodeJS.Timeout | null = null;
+  private debounceTimerId: number | null = null;
+  private polling = false; // guard against overlapping polls
   private onCloudChangeCallback: OnCloudChangeCallback | null = null;
   private lastLog: (msg: string) => void = () => {};
-  private backoffMs = 0;
-  private maxBackoffMs = 60000; // 60 seconds
 
-  async start(config: ObsyncianConfig, onLog: (msg: string) => void): Promise<void> {
+  /**
+   * Create SQS queue + SNS subscription. Does NOT start polling.
+   * Call `startPolling()` after setup.
+   */
+  async setup(config: ObsyncianConfig, onLog: (msg: string) => void): Promise<void> {
     if (!config.snsTopicArn) {
-      onLog('[SQS] No SNS topic configured, skipping SQS listener');
+      onLog('[SQS] No SNS topic configured, skipping SQS setup');
       return;
     }
 
@@ -57,35 +59,14 @@ class SQSListenerService {
     });
 
     try {
-      // Create SQS queue
       const queueName = `obsyncian-${this.deviceId}`;
-      this.lastLog(`[SQS] Creating queue: ${queueName}`);
+      this.queueUrl = await this.getOrCreateQueue(queueName);
+      this.lastLog(`[SQS] Queue ready: ${this.queueUrl}`);
 
-      const createQueueResponse = await this.sqsClient.send(
-        new CreateQueueCommand({
-          QueueName: queueName,
-          Attributes: {
-            ReceiveMessageWaitTimeSeconds: '20', // long poll
-            MessageRetentionPeriod: '300', // 5 minutes
-            VisibilityTimeout: '30',
-          },
-        }),
-      );
-
-      this.queueUrl = createQueueResponse.QueueUrl || '';
-      if (!this.queueUrl) throw new Error('Failed to create SQS queue');
-
-      this.lastLog(`[SQS] Queue created: ${this.queueUrl}`);
-
-      // Subscribe to SNS
-      this.lastLog('[SQS] Subscribing to SNS topic');
-
-      // Get queue ARN
       const queueArn = await this.getQueueArn();
-
-      // Set queue policy to allow SNS
       await this.setQueuePolicy(queueArn);
 
+      this.lastLog('[SQS] Subscribing to SNS topic');
       const subscribeResponse = await this.snsClient.send(
         new SubscribeCommand({
           TopicArn: this.snsTopicArn,
@@ -96,126 +77,86 @@ class SQSListenerService {
 
       this.subscriptionArn = subscribeResponse.SubscriptionArn || '';
       this.lastLog(`[SQS] Subscribed to SNS: ${this.subscriptionArn}`);
-
-      this.running = true;
-      this.backoffMs = 0;
-      this.pollLoop();
     } catch (error) {
-      this.lastLog(`[SQS] Start error: ${error}`);
+      this.lastLog(`[SQS] Setup error: ${error}`);
       throw error;
     }
   }
 
+  get isReady(): boolean {
+    return !!this.queueUrl && !!this.sqsClient;
+  }
+
+  /**
+   * Called every tick by the background service's unified timer.
+   * Short-polls SQS once. Non-blocking: skips if a previous poll is still in flight.
+   */
+  pollOnce(): void {
+    if (!this.isReady) return;
+    this.tick();
+  }
+
   async stop(): Promise<void> {
-    this.running = false;
-
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
+    if (this.debounceTimerId !== null) {
+      BackgroundTimer.clearTimeout(this.debounceTimerId);
+      this.debounceTimerId = null;
     }
 
-    try {
-      // Unsubscribe from SNS
-      if (this.subscriptionArn && this.snsClient) {
-        this.lastLog('[SQS] Unsubscribing from SNS');
-        await this.snsClient.send(
-          new UnsubscribeCommand({
-            SubscriptionArn: this.subscriptionArn,
-          }),
-        );
-      }
-
-      // Delete queue
-      if (this.queueUrl && this.sqsClient) {
-        this.lastLog('[SQS] Deleting queue');
-        await this.sqsClient.send(
-          new DeleteQueueCommand({
-            QueueUrl: this.queueUrl,
-          }),
-        );
-      }
-
-      this.lastLog('[SQS] Listener stopped');
-    } catch (error) {
-      this.lastLog(`[SQS] Stop error: ${error}`);
-    }
+    // Keep queue alive — recreating after delete has a 60s cooldown that causes
+    // startup failures. SNS subscription also persists so messages keep arriving.
+    this.lastLog('[SQS] Listener stopped (queue + subscription kept for next startup)');
+    this.queueUrl = '';
+    this.subscriptionArn = '';
   }
 
   setOnCloudChange(callback: OnCloudChangeCallback): void {
     this.onCloudChangeCallback = callback;
   }
 
-  private async pollLoop(): Promise<void> {
-    while (this.running) {
-      if (this.backoffMs > 0) {
-        // Wait before next poll (exponential backoff)
-        await this.sleep(this.backoffMs);
-      }
+  private async tick(): Promise<void> {
+    if (this.polling || !this.sqsClient) return; // skip if previous poll still running
+    this.polling = true;
 
-      try {
-        await this.receiveAndProcess();
-      } catch (error) {
-        if (!this.running) return;
-
-        this.lastLog(`[SQS] Poll error: ${error}`);
-        // On error, apply backoff
-        this.backoffMs = Math.min(
-          this.backoffMs === 0 ? 5000 : this.backoffMs * 2,
-          this.maxBackoffMs,
-        );
-      }
-    }
-  }
-
-  private async receiveAndProcess(): Promise<void> {
-    if (!this.sqsClient) throw new Error('SQS client not initialized');
-
-    const response = await this.sqsClient.send(
-      new ReceiveMessageCommand({
-        QueueUrl: this.queueUrl,
-        MaxNumberOfMessages: 10,
-        WaitTimeSeconds: 20,
-      }),
-    );
-
-    if (!response.Messages || response.Messages.length === 0) {
-      // No messages: increase backoff
-      this.backoffMs = Math.min(
-        this.backoffMs === 0 ? 5000 : this.backoffMs * 2,
-        this.maxBackoffMs,
+    try {
+      const response = await this.sqsClient.send(
+        new ReceiveMessageCommand({
+          QueueUrl: this.queueUrl,
+          MaxNumberOfMessages: 10,
+          WaitTimeSeconds: 0, // short poll — returns immediately
+        }),
       );
-      return;
-    }
 
-    // Messages received: reset backoff
-    this.backoffMs = 0;
-
-    // Delete messages
-    for (const message of response.Messages) {
-      if (message.ReceiptHandle) {
-        try {
-          await this.sqsClient.send(
-            new DeleteMessageCommand({
-              QueueUrl: this.queueUrl,
-              ReceiptHandle: message.ReceiptHandle,
-            }),
-          );
-        } catch (error) {
-          this.lastLog(`[SQS] Failed to delete message: ${error}`);
+      if (response.Messages && response.Messages.length > 0) {
+        // Delete messages
+        for (const msg of response.Messages) {
+          if (msg.ReceiptHandle) {
+            try {
+              await this.sqsClient.send(
+                new DeleteMessageCommand({
+                  QueueUrl: this.queueUrl,
+                  ReceiptHandle: msg.ReceiptHandle,
+                }),
+              );
+            } catch (e) {
+              this.lastLog(`[SQS] Delete message error: ${e}`);
+            }
+          }
         }
+        this.debouncedSync();
       }
+    } catch (error) {
+      this.lastLog(`[SQS] Poll error: ${error}`);
+    } finally {
+      this.polling = false;
     }
-
-    // Trigger sync with debounce (2 seconds)
-    this.debouncedSync();
   }
 
   private debouncedSync(): void {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
+    if (this.debounceTimerId !== null) {
+      BackgroundTimer.clearTimeout(this.debounceTimerId);
     }
 
-    this.debounceTimer = setTimeout(() => {
+    this.debounceTimerId = BackgroundTimer.setTimeout(() => {
       this.lastLog('[SQS] Cloud change detected, triggering sync');
       if (this.onCloudChangeCallback) {
         try {
@@ -224,8 +165,45 @@ class SQSListenerService {
           this.lastLog(`[SQS] onCloudChange callback error: ${error}`);
         }
       }
-      this.debounceTimer = null;
+      this.debounceTimerId = null;
     }, 2000);
+  }
+
+  /** Get existing queue URL, or create if it doesn't exist. */
+  private async getOrCreateQueue(queueName: string): Promise<string> {
+    if (!this.sqsClient) throw new Error('SQS client not initialized');
+
+    // Try to get existing queue first
+    try {
+      const resp = await this.sqsClient.send(
+        new GetQueueUrlCommand({ QueueName: queueName }),
+      );
+      if (resp.QueueUrl) {
+        this.lastLog(`[SQS] Using existing queue: ${queueName}`);
+        return resp.QueueUrl;
+      }
+    } catch (e: any) {
+      // QueueDoesNotExist → fall through to create
+      if (e?.name !== 'QueueDoesNotExist' && e?.name !== 'AWS.SimpleQueueService.NonExistentQueue') {
+        throw e;
+      }
+    }
+
+    // Queue doesn't exist — create it
+    this.lastLog(`[SQS] Creating queue: ${queueName}`);
+    const resp = await this.sqsClient.send(
+      new CreateQueueCommand({
+        QueueName: queueName,
+        Attributes: {
+          ReceiveMessageWaitTimeSeconds: '0',
+          MessageRetentionPeriod: '300',
+          VisibilityTimeout: '30',
+        },
+      }),
+    );
+
+    if (!resp.QueueUrl) throw new Error('Failed to create SQS queue');
+    return resp.QueueUrl;
   }
 
   private async getQueueArn(): Promise<string> {
@@ -267,10 +245,6 @@ class SQSListenerService {
         Attributes: { Policy: policy },
       }),
     );
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 
