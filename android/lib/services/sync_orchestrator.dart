@@ -9,6 +9,26 @@ import 's3_sync_service.dart';
 /// Current state of the sync engine.
 enum SyncState { idle, syncing, error, offline }
 
+/// Result of a sync cycle, with counts of files changed.
+class SyncResult {
+  final int uploaded;
+  final int downloaded;
+  final int deleted;
+
+  bool get hadChanges => uploaded > 0 || downloaded > 0 || deleted > 0;
+
+  const SyncResult({
+    required this.uploaded,
+    required this.downloaded,
+    required this.deleted,
+  });
+
+  const SyncResult.noChanges()
+      : uploaded = 0,
+        downloaded = 0,
+        deleted = 0;
+}
+
 /// Orchestrates sync operations between local files and S3/DynamoDB.
 ///
 /// This mirrors the Go app's `handleSyncAsync` logic in `sync_logic.go`:
@@ -61,21 +81,25 @@ class SyncOrchestrator {
 
   /// Run a full sync cycle. If a sync is already in progress, queues another
   /// cycle to run when the current one completes.
-  Future<void> sync() async {
+  /// Returns a [SyncResult] with counts of files changed, or null if the
+  /// sync was queued (not executed immediately).
+  Future<SyncResult?> sync() async {
     if (_state == SyncState.syncing) {
       _isSyncQueued = true;
       _log('Sync already in progress, queued another cycle.');
-      return;
+      return null;
     }
 
     _setState(SyncState.syncing);
 
+    SyncResult result;
     try {
-      await _handleSync();
+      result = await _handleSync();
       _setState(SyncState.idle);
     } catch (e) {
       _log('Sync error: $e');
       _setState(SyncState.error);
+      rethrow;
     }
 
     // If another sync was requested while we were busy, run it now.
@@ -83,16 +107,11 @@ class SyncOrchestrator {
       _isSyncQueued = false;
       sync(); // fire-and-forget; it will set state itself
     }
+
+    return result;
   }
 
-  /// The core sync algorithm, matching `handleSyncAsync` from the Go app.
-  ///
-  /// After syncing down, the dry-run check is skipped for this cycle to prevent
-  /// a race condition: if S3 changes between our sync-down and the dry-run,
-  /// the diff would be misinterpreted as local changes. The next sync trigger
-  /// (SQS notification, manual button, or lifecycle event) will handle any
-  /// genuine local changes.
-  Future<void> _handleSync() async {
+  Future<SyncResult> _handleSync() async {
     _log('Last local sync: ${DateTime.now()}');
     _log('Config: region=${_config.awsRegion}, bucket=${_config.cloud}, '
         'key=${_config.credentials.key.substring(0, 4)}...');
@@ -104,16 +123,18 @@ class SyncOrchestrator {
     if (latestSync == null) {
       // Table is empty — this must be the first device ever.
       _log('Table is empty. Syncing up...');
-      await _s3Service.syncUp();
+      final diff = await _s3Service.syncUp();
       await _dynamoDBService.createUser(_config.id);
       await _dynamoDBService.updateTimestamp(_config.id);
       _log('Finished syncing up (new table).');
-      return;
+      return SyncResult(
+        uploaded: diff.toUpload.length,
+        downloaded: 0,
+        deleted: diff.toDelete.length,
+      );
     }
 
     _log('Latest cloud sync: ${latestSync.timestamp} by ${latestSync.userId}');
-
-    bool didSyncDown = false;
 
     // 2. Check if our user exists
     final ourItem = await _dynamoDBService.getUser(_config.id);
@@ -122,36 +143,36 @@ class SyncOrchestrator {
       _log('User ${_config.id} not found in table. Creating & syncing down...');
       await _dynamoDBService.createUser(_config.id);
       _log('Syncing down from S3...');
-      await _s3Service.syncDown();
+      final diff = await _s3Service.syncDown();
       await _saveLastSyncedTimestamp(latestSync.timestamp);
       _log('Finished syncing down (new user).');
-      didSyncDown = true;
-    } else {
-      // 3. Check if we need to sync down
-      final needsSyncDown = _config.id != latestSync.userId &&
-          latestSync.timestamp.compareTo(ourItem.timestamp) >= 0 &&
-          _lastSyncedTimestamp.compareTo(latestSync.timestamp) < 0;
-
-      if (needsSyncDown) {
-        _log('Not synced with Cloud. Syncing down from S3...');
-        await _s3Service.syncDown();
-        await _saveLastSyncedTimestamp(latestSync.timestamp);
-        _log('Finished syncing down.');
-        didSyncDown = true;
-      } else {
-        _log('Already synced with Cloud.');
-      }
+      return SyncResult(
+        uploaded: 0,
+        downloaded: diff.toDownload.length,
+        deleted: diff.toDelete.length,
+      );
     }
 
-    // 4. Skip the dry-run if we just synced down — local files now match the
-    //    cloud snapshot we pulled. Any diff at this point would be a race
-    //    (another device syncing up during our sync-down) not a real local edit.
-    if (didSyncDown) {
-      _log('Skipping local change check after sync-down (race prevention).');
-      return;
+    // 3. Check if we need to sync down
+    final needsSyncDown = _config.id != latestSync.userId &&
+        latestSync.timestamp.compareTo(ourItem.timestamp) >= 0 &&
+        _lastSyncedTimestamp.compareTo(latestSync.timestamp) < 0;
+
+    if (needsSyncDown) {
+      _log('Not synced with Cloud. Syncing down from S3...');
+      final diff = await _s3Service.syncDown();
+      await _saveLastSyncedTimestamp(latestSync.timestamp);
+      _log('Finished syncing down.');
+      return SyncResult(
+        uploaded: 0,
+        downloaded: diff.toDownload.length,
+        deleted: diff.toDelete.length,
+      );
     }
 
-    // 5. Check for local changes via dry-run
+    _log('Already synced with Cloud.');
+
+    // 4. Check for local changes via dry-run
     _log('Checking for local changes (dry-run S3 diff)...');
     final diff = await _s3Service.dryRunSyncUp();
 
@@ -160,9 +181,15 @@ class SyncOrchestrator {
       await _s3Service.syncUp();
       await _dynamoDBService.updateTimestamp(_config.id);
       _log('Finished syncing up.');
-    } else {
-      _log('No local changes to sync.');
+      return SyncResult(
+        uploaded: diff.toUpload.length,
+        downloaded: 0,
+        deleted: diff.toDelete.length,
+      );
     }
+
+    _log('No local changes to sync.');
+    return const SyncResult.noChanges();
   }
 
   void _setState(SyncState newState) {

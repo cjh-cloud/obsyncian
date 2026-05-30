@@ -13,6 +13,7 @@ import '../services/dynamodb_service.dart';
 import '../services/s3_sync_service.dart';
 import '../services/sqs_listener_service.dart';
 import '../services/sync_orchestrator.dart';
+import '../services/sync_notification_service.dart';
 
 /// Central application state, exposed to the widget tree via [ChangeNotifierProvider].
 ///
@@ -33,6 +34,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   final DynamoDBService _dynamoDBService = DynamoDBService();
   final SQSListenerService _sqsListener = SQSListenerService();
   final ConnectivityService _connectivity = ConnectivityService();
+  final SyncNotificationService _notifications = SyncNotificationService();
   late final SyncOrchestrator _orchestrator;
 
   // -- State ------------------------------------------------------------------
@@ -69,6 +71,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   /// monitoring, and listen for background-service sync requests.
   Future<void> initialise() async {
     WidgetsBinding.instance.addObserver(this);
+
+    // Initialise sync notifications (requests permission on Android 13+)
+    await _notifications.initialise();
 
     // Listen to sync log stream
     _subscriptions.add(
@@ -115,9 +120,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
-      case AppLifecycleState.resumed:
-        _addLog('App resumed. Syncing...');
-        triggerSync();
       case AppLifecycleState.paused:
         _addLog('App paused. Syncing...');
         triggerSync();
@@ -187,7 +189,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _addLog('Cannot sync: device is offline.');
       return;
     }
-    await _orchestrator.sync();
+
+    await _notifications.showSyncStarted();
+    try {
+      final result = await _orchestrator.sync();
+      if (result != null) {
+        await _notifications.showSyncCompleted(result);
+      }
+    } catch (e) {
+      await _notifications.showSyncFailed('$e');
+    }
   }
 
   // ---------------------------------------------------------------------------

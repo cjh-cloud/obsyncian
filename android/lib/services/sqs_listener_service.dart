@@ -11,13 +11,13 @@ import 'aws_signing_client.dart';
 /// Debounce time to avoid triggering multiple syncs from rapid S3 events.
 const _sqsDebounceTime = Duration(seconds: 2);
 
-/// Listens for S3 change notifications via a temporary SQS queue subscribed
-/// to an SNS topic. Mirrors the Go app's SQSListener.
+/// Listens for S3 change notifications via an SQS queue (persisted per device)
+/// subscribed to an SNS topic. Mirrors the Go app's SQSListener.
 ///
 /// Lifecycle:
 ///   1. [configure] — set credentials & topic ARN
-///   2. [start] — creates queue, subscribes to SNS, begins long-polling
-///   3. [stop] — unsubscribes, deletes queue, stops polling
+///   2. [start] — creates queue (or reuses if already exists), subscribes to SNS, begins long-polling
+///   3. [stop] — unsubscribes from SNS, stops polling (queue persists)
 class SQSListenerService {
   late sqs_api.SQS _sqsClient;
   late sns_api.SNS _snsClient;
@@ -119,16 +119,24 @@ class SQSListenerService {
   Future<void> _createQueue() async {
     final queueName = 'obsyncian-$_deviceId';
 
-    final createResult = await _sqsClient.createQueue(
-      queueName: queueName,
-      attributes: {
-        sqs_api.QueueAttributeName.receiveMessageWaitTimeSeconds: '20',
-        sqs_api.QueueAttributeName.messageRetentionPeriod: '300',
-        sqs_api.QueueAttributeName.visibilityTimeout: '30',
-      },
-    );
+    // Try to reuse an existing queue first. createQueue fails if the queue
+    // exists with different attributes, so we look it up by name instead.
+    try {
+      final existing = await _sqsClient.getQueueUrl(queueName: queueName);
+      _queueUrl = existing.queueUrl ?? '';
+    } catch (_) {
+      // Queue doesn't exist yet — create it.
+      final createResult = await _sqsClient.createQueue(
+        queueName: queueName,
+        attributes: {
+          sqs_api.QueueAttributeName.receiveMessageWaitTimeSeconds: '20',
+          sqs_api.QueueAttributeName.messageRetentionPeriod: '300',
+          sqs_api.QueueAttributeName.visibilityTimeout: '30',
+        },
+      );
+      _queueUrl = createResult.queueUrl ?? '';
+    }
 
-    _queueUrl = createResult.queueUrl ?? '';
     if (_queueUrl.isEmpty) throw Exception('Failed to get queue URL');
 
     // Get queue ARN
@@ -251,14 +259,8 @@ class SQSListenerService {
       }
     }
 
-    // Delete the queue
-    if (_queueUrl.isNotEmpty) {
-      try {
-        await _sqsClient.deleteQueue(queueUrl: _queueUrl);
-      } catch (e) {
-        _log('Failed to delete SQS queue: $e');
-      }
-    }
+    // Queue is intentionally NOT deleted — it persists across app restarts.
+    // createQueue() is idempotent and will reuse the existing queue on next start.
 
     _queueUrl = '';
     _queueArn = '';

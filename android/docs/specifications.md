@@ -25,8 +25,10 @@ Obsyncian for Android is a Flutter-based mobile application that synchronises lo
 - The `Obsyncian` DynamoDB table tracks the latest sync timestamp per user/device.
 - On each sync cycle the app:
   1. Scans for the globally latest timestamp.
-  2. Determines whether to sync down, sync up, or both.
+  2. Determines whether to sync down or check for local changes (never both in one cycle).
   3. Updates its own timestamp after a successful sync up.
+- After syncing down, the dry-run check is skipped to prevent a race condition where concurrent cloud changes could be misinterpreted as local edits.
+- The last-synced timestamp is persisted in SharedPreferences to survive app restarts.
 - Timestamp format: `YYYYMMDDHHmmss` (matching the Go app).
 
 ### FR-4: Event-Driven Sync (SQS/SNS)
@@ -48,11 +50,12 @@ Obsyncian for Android is a Flutter-based mobile application that synchronises lo
 - A persistent notification ("Obsyncian - Syncing your vault in the background") is shown.
 - A periodic fallback sync runs every 5 minutes in case events are missed.
 
-### FR-7: Local File Watching
+### FR-7: App Lifecycle Sync
 
-- The local vault directory is watched for file system events.
-- Changes are debounced (500 ms) before triggering a sync cycle.
-- Hidden files/directories (starting with `.`) are ignored.
+- `AppState` implements `WidgetsBindingObserver` to detect app lifecycle transitions.
+- **On resume (foreground)**: triggers a sync to pull any cloud changes made while backgrounded.
+- **On pause (background)**: triggers a sync to push any local edits made in Obsidian.
+- This replaces the previous file watcher approach, which was removed to reduce battery consumption on mobile devices.
 
 ## Non-Functional Requirements
 

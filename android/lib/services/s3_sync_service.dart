@@ -88,7 +88,8 @@ class S3SyncService {
   // ---------------------------------------------------------------------------
 
   /// Sync from local to S3 (upload local changes, delete remote orphans).
-  Future<void> syncUp() async {
+  /// Returns a [SyncDiff] describing what was synced.
+  Future<SyncDiff> syncUp() async {
     _log('Syncing local -> S3...');
     final localEntries = await _listLocalFiles();
     final remoteEntries = await _listRemoteObjects();
@@ -96,11 +97,15 @@ class S3SyncService {
     final localMap = {for (final e in localEntries) e.key: e};
     final remoteMap = {for (final e in remoteEntries) e.key: e};
 
+    final uploaded = <String>[];
+    final deleted = <String>[];
+
     // Upload new/changed files
     for (final entry in localEntries) {
       final remote = remoteMap[entry.key];
       if (remote == null || remote.etag != entry.etag) {
         await _uploadFile(entry.key);
+        uploaded.add(entry.key);
       }
     }
 
@@ -108,14 +113,17 @@ class S3SyncService {
     for (final key in remoteMap.keys) {
       if (!localMap.containsKey(key)) {
         await _deleteRemoteObject(key);
+        deleted.add(key);
       }
     }
 
     _log('Sync up complete.');
+    return SyncDiff(toUpload: uploaded, toDownload: [], toDelete: deleted);
   }
 
   /// Sync from S3 to local (download remote changes, delete local orphans).
-  Future<void> syncDown() async {
+  /// Returns a [SyncDiff] describing what was synced.
+  Future<SyncDiff> syncDown() async {
     _log('Syncing S3 -> local...');
     final localEntries = await _listLocalFiles();
     final remoteEntries = await _listRemoteObjects();
@@ -123,11 +131,15 @@ class S3SyncService {
     final localMap = {for (final e in localEntries) e.key: e};
     final remoteMap = {for (final e in remoteEntries) e.key: e};
 
+    final downloaded = <String>[];
+    final deleted = <String>[];
+
     // Download new/changed files
     for (final entry in remoteEntries) {
       final local = localMap[entry.key];
       if (local == null || local.etag != entry.etag) {
         await _downloadFile(entry.key);
+        downloaded.add(entry.key);
       }
     }
 
@@ -135,10 +147,12 @@ class S3SyncService {
     for (final key in localMap.keys) {
       if (!remoteMap.containsKey(key)) {
         _deleteLocalFile(key);
+        deleted.add(key);
       }
     }
 
     _log('Sync down complete.');
+    return SyncDiff(toUpload: [], toDownload: downloaded, toDelete: deleted);
   }
 
   /// Perform a dry run comparing local to S3. Returns the diff without

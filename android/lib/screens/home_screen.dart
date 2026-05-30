@@ -19,6 +19,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final ScrollController _scrollController = ScrollController();
+  bool _logsExpanded = false;
 
   @override
   void dispose() {
@@ -78,23 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
           : appState.isConfigured
               ? _buildConfiguredView(context, appState, theme)
               : _buildUnconfiguredView(context, appState, theme),
-      floatingActionButton: appState.isConfigured
-          ? FloatingActionButton.extended(
-              onPressed: appState.syncState == SyncState.syncing
-                  ? null
-                  : () => appState.triggerSync(),
-              icon: appState.syncState == SyncState.syncing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.sync),
-              label: Text(appState.syncState == SyncState.syncing
-                  ? 'Syncing...'
-                  : 'Sync now'),
-            )
-          : null,
     );
   }
 
@@ -221,19 +205,59 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildConfiguredView(
       BuildContext context, AppState appState, ThemeData theme) {
-    // Auto-scroll to bottom when logs change
-    _scrollToBottom();
+    if (_logsExpanded) _scrollToBottom();
 
     return Column(
       children: [
-        // Config summary card
         _buildConfigCard(appState, theme),
-        // Sync status
         _buildSyncStatusBar(appState, theme),
-        // Log output
-        Expanded(
-          child: _buildLogView(appState, theme),
+        _buildLogSection(appState, theme),
+      ],
+    );
+  }
+
+  Widget _buildLogSection(AppState appState, ThemeData theme) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: () => setState(() => _logsExpanded = !_logsExpanded),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            child: Row(
+              children: [
+                Icon(
+                  _logsExpanded
+                      ? Icons.expand_less
+                      : Icons.expand_more,
+                  size: 20,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Logs',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (appState.logs.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    '(${appState.logs.length})',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.outline,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
+        if (_logsExpanded)
+          SizedBox(
+            height: 220,
+            child: _buildLogView(appState, theme),
+          ),
       ],
     );
   }
@@ -331,8 +355,8 @@ class _HomeScreenState extends State<HomeScreen> {
             label,
             style: theme.textTheme.labelMedium?.copyWith(color: color),
           ),
+          const Spacer(),
           if (!appState.isOnline) ...[
-            const Spacer(),
             Icon(Icons.wifi_off, size: 14, color: theme.colorScheme.error),
             const SizedBox(width: 4),
             Text(
@@ -340,7 +364,23 @@ class _HomeScreenState extends State<HomeScreen> {
               style: theme.textTheme.labelSmall
                   ?.copyWith(color: theme.colorScheme.error),
             ),
+            const SizedBox(width: 12),
           ],
+          FilledButton.tonalIcon(
+            onPressed: appState.syncState == SyncState.syncing
+                ? null
+                : () => appState.triggerSync(),
+            icon: appState.syncState == SyncState.syncing
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.sync, size: 18),
+            label: Text(appState.syncState == SyncState.syncing
+                ? 'Syncing...'
+                : 'Sync now'),
+          ),
         ],
       ),
     );
@@ -362,7 +402,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return ListView.builder(
       controller: _scrollController,
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 80),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       itemCount: logs.length,
       itemBuilder: (context, index) {
         return Padding(

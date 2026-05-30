@@ -11,12 +11,12 @@
                │ Provider (ChangeNotifier)
 ┌──────────────▼──────────────────────────┐
 │              AppState                    │
-│  (owns all services, wires callbacks)    │
-└──┬──────┬──────┬──────┬──────┬──────┬───┘
-   │      │      │      │      │      │
-   ▼      ▼      ▼      ▼      ▼      ▼
-Config  Sync   S3Sync  Dynamo  SQS   File
-Service Orch.  Service  DB    Listener Watcher
+│  (owns services, lifecycle observer)     │
+└──┬──────┬──────┬──────┬──────┬──────────┘
+   │      │      │      │      │
+   ▼      ▼      ▼      ▼      ▼
+Config  Sync   S3Sync  Dynamo  SQS    Background
+Service Orch.  Service  DB    Listener  Sync
                Service        Service  Service
                   │      │      │
                   ▼      ▼      ▼
@@ -39,7 +39,7 @@ Service Orch.  Service  DB    Listener Watcher
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| `AppState` | `lib/providers/app_state.dart` | Central `ChangeNotifier`. Owns service instances, wires callbacks (file change -> sync, reconnect -> sync, SQS notification -> sync). Exposes config, sync state, connectivity, and log entries to the UI. |
+| `AppState` | `lib/providers/app_state.dart` | Central `ChangeNotifier` with `WidgetsBindingObserver`. Owns service instances, wires callbacks (lifecycle -> sync, reconnect -> sync, SQS notification -> sync). Exposes config, sync state, connectivity, and log entries to the UI. |
 
 ### Service Layer
 
@@ -51,7 +51,6 @@ Service Orch.  Service  DB    Listener Watcher
 | `DynamoDBService` | `lib/services/dynamodb_service.dart` | Scans for latest sync timestamp, gets/creates/updates user items. |
 | `SQSListenerService` | `lib/services/sqs_listener_service.dart` | Creates temp SQS queue, subscribes to SNS, long-polls for messages, debounces notifications, cleans up on stop. |
 | `ConnectivityService` | `lib/services/connectivity_service.dart` | Monitors network state via `connectivity_plus`. Fires `onReconnect` callback on offline-to-online transition. |
-| `FileWatcherService` | `lib/services/file_watcher_service.dart` | Watches local vault directory for file changes. Debounces events before triggering sync. |
 | `BackgroundSyncService` | `lib/services/background_service.dart` | Android foreground service via `flutter_background_service`. Periodic 5-minute sync fallback. |
 
 ### Models
@@ -63,16 +62,16 @@ Service Orch.  Service  DB    Listener Watcher
 
 ## Data Flow: Sync Cycle
 
-1. **Trigger**: file change / SQS notification / manual button / periodic timer / reconnect
+1. **Trigger**: SQS notification / app lifecycle (resume/pause) / manual button / periodic timer / reconnect
 2. `AppState.triggerSync()` -> `SyncOrchestrator.sync()`
 3. `SyncOrchestrator._handleSync()`:
    a. `DynamoDBService.getLatestSync()` — scan table for newest timestamp
-   b. Decide: sync up, sync down, or both (same logic as Go app)
-   c. `S3SyncService.syncDown()` / `S3SyncService.syncUp()` / `S3SyncService.dryRunSyncUp()`
+   b. Decide: sync down or check local changes (never both in one cycle)
+   c. `S3SyncService.syncDown()` or `S3SyncService.dryRunSyncUp()` + `S3SyncService.syncUp()`
    d. `DynamoDBService.updateTimestamp()` after successful sync up
 4. Progress messages streamed to `AppState._logs` -> UI rebuilds
 
-## Sync Algorithm (mirrors `handleSyncAsync` in Go)
+## Sync Algorithm
 
 ```
 scan DynamoDB for latest timestamp
@@ -85,15 +84,24 @@ get our user entry
 if user not found:
     create user entry
     sync down (S3 -> local)
+    return  <-- skip dry-run after sync-down
 
 if another user synced more recently AND we haven't seen that timestamp:
     sync down (S3 -> local)
+    return  <-- skip dry-run after sync-down
 
 dry-run: compare local files vs S3 objects
 if local changes detected:
     sync up (local -> S3)
     update our timestamp in DynamoDB
 ```
+
+The dry-run is intentionally skipped after a sync-down. This prevents a race
+condition where S3 changes between the sync-down and the dry-run would be
+misinterpreted as local edits, causing the mobile to overwrite newer cloud
+content. Local changes are picked up on the next sync trigger.
+
+`_lastSyncedTimestamp` is persisted in SharedPreferences to survive app restarts.
 
 ## Key Packages
 
@@ -106,9 +114,8 @@ if local changes detected:
 | `file_picker` | Android SAF-compatible file picker |
 | `connectivity_plus` | Network state monitoring |
 | `flutter_background_service` | Android foreground service |
-| `watcher` | File system change events |
 | `provider` | State management |
-| `shared_preferences` | Persist config path |
+| `shared_preferences` | Persist config path and sync state |
 | `crypto` | MD5 hashing for ETag comparison |
 
 ## Configuration
