@@ -55,14 +55,13 @@ export async function ensureAndroidVaultStorageAccess(
     }
   }
 
-  if (!isRemovableExternalVaultPath(vaultPath)) return;
   if (api < 30 || !native?.canManageExternalStorage || !native.openManageAllFilesAccess) return;
 
   try {
     const ok = await native.canManageExternalStorage();
     if (ok) return;
     onLog?.(
-      '[Permissions] Vault is on removable storage. Open system settings and enable “All files access” for Obsyncian, then run sync again.',
+      '[Permissions] “All files access” is required. Opening system settings — please enable it for Obsyncian, then return to the app.',
     );
     await native.openManageAllFilesAccess();
   } catch (e) {

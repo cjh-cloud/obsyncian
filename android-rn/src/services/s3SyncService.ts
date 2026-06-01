@@ -333,6 +333,8 @@ class S3SyncService {
 
   private async listLocalFiles(): Promise<FileInfo[]> {
     const files: FileInfo[] = [];
+    let scanned = 0;
+    let hashed = 0;
 
     const walk = async (dir: string, basePath: string = ''): Promise<void> => {
       try {
@@ -348,6 +350,7 @@ class S3SyncService {
           if (item.isDirectory()) {
             await walk(item.path, relativePath);
           } else {
+            scanned++;
             const stat = await RNFS.stat(item.path);
             const mtimeMs = statMtimeMs(stat);
             const size = Number(stat.size) || 0;
@@ -357,6 +360,11 @@ class S3SyncService {
             if (cached?.md5 && cached.mtime === mtimeMs && cached.size === size) {
               md5Hex = cached.md5;
             } else {
+              hashed++;
+              if (hashed % 50 === 1) {
+                this.lastLog(`[S3] Hashing local files... (${hashed} hashed, ${scanned} scanned)`);
+                this.emitProgress({ phase: 'listing', current: scanned, total: 0, file: relativePath });
+              }
               md5Hex = await this.md5HexOfFileFromDisk(item.path);
               fileStatCache.set(relativePath, { mtime: mtimeMs, size, md5: md5Hex });
             }
@@ -375,6 +383,9 @@ class S3SyncService {
     };
 
     await walk(this.vaultPath);
+    if (hashed > 0) {
+      this.lastLog(`[S3] Local scan complete: ${scanned} files scanned, ${hashed} hashed`);
+    }
     return files;
   }
 

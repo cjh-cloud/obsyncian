@@ -61,28 +61,15 @@ class SyncOrchestrator {
 
   async sync(deviceId: string): Promise<void> {
     if (this.isSyncing) {
-      this.log('[Sync] Already syncing, queueing next sync');
-      this.isSyncQueued = true;
+      this.log('[Sync] Already syncing, skipping');
       return;
     }
 
     this.isSyncing = true;
     this.changeState('syncing');
 
-    // NOTE: no keepalive timer here — the background service's unified
-    // 2 s runBackgroundTimer tick acts as the keepalive, waking the JS
-    // thread so pending HTTP-response events are processed between awaits.
-
     try {
       await this.handleSync(deviceId);
-
-      if (this.isSyncQueued) {
-        this.log('[Sync] Queued sync triggered');
-        this.isSyncQueued = false;
-        await this.sync(deviceId);
-        return;
-      }
-
       this.changeState('idle');
     } catch (error) {
       this.log(`[Sync] Error: ${error}`);
